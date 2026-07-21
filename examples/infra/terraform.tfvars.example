@@ -1,0 +1,3 @@
+# Optional local overrides — do not commit secrets
+# aws_region   = "eu-central-1"
+# project_name = "tfstate-demo"
