@@ -321,22 +321,24 @@ def resource_lines(rtype: str, name: str, attrs: dict[str, Any]) -> list[str]:
 
         lines.append(f"  {key} = {emit_value(value, 1)}")
 
-    # Provider defaults that otherwise show up as noisy in-place updates
+    ignore: list[str] = list(sorted(omit_blocks)) if omit_blocks else []
+
+    # Defaults / empty optionals: ignore rather than invent values that would
+    # mutate the live resource on apply (e.g. empty SG description).
     if rtype == "aws_security_group":
-        desc = attrs.get("description")
-        if is_empty(desc):
-            lines.append('  description = "Managed by Terraform"')
-        if "revoke_rules_on_delete" not in attrs or attrs.get("revoke_rules_on_delete") is None:
-            lines.append("  revoke_rules_on_delete = false")
+        if is_empty(attrs.get("description")):
+            ignore.append("description")
+        if attrs.get("revoke_rules_on_delete") is None:
+            ignore.append("revoke_rules_on_delete")
     if rtype == "aws_instance":
         if attrs.get("user_data_replace_on_change") is None:
-            lines.append("  user_data_replace_on_change = false")
+            ignore.append("user_data_replace_on_change")
 
-    # Ignore omitted nested state so plan does not try to clear them
-    if omit_blocks:
-        ignore = ", ".join(sorted(omit_blocks))
+    if ignore:
+        # de-dupe, stable order
+        ignore_u = ", ".join(sorted(set(ignore)))
         lines.append("  lifecycle {")
-        lines.append(f"    ignore_changes = [{ignore}]")
+        lines.append(f"    ignore_changes = [{ignore_u}]")
         lines.append("  }")
 
     lines.append("}")
