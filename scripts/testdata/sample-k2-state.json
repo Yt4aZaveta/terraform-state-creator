@@ -18,8 +18,8 @@
             "network_interface": "eni-XXXX",
             "private_ip": "172.16.0.4",
             "public_ip": "93.183.64.35",
-            "tags": {},
-            "tags_all": {},
+            "tags": {"Name": "mail.yt4azaveta.ru"},
+            "tags_all": {"Name": "mail.yt4azaveta.ru"},
             "vpc": true
           }
         }
@@ -76,8 +76,8 @@
               }
             ],
             "subnet_id": "subnet-49083982",
-            "tags": {"Name": "lab"},
-            "tags_all": {"Name": "lab"},
+            "tags": {"Name": "mail.yt4azaveta.ru"},
+            "tags_all": {"Name": "mail.yt4azaveta.ru"},
             "vpc_security_group_ids": ["sg-255640d3"]
           }
         }
