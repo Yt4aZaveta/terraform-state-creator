@@ -19,10 +19,202 @@ tf_name() {
   if [[ ! "${name}" =~ ^[a-z_] ]]; then
     name="r_${name}"
   fi
-  # Terraform names max ~ practical length
   printf '%s' "${name:0:60}"
 }
 
 json_escape() {
   printf '%s' "$1" | jq -Rs .
+}
+
+# True when c2rc / K2 Cloud style endpoints are loaded.
+is_k2_cloud() {
+  [[ -n "${EC2_URL:-}" || -n "${S3_URL:-}" || "${CLOUD_PROVIDER:-}" == "k2" ]]
+}
+
+# Infer region from EC2_URL like https://ec2.ru-msk.k2.cloud → ru-msk
+infer_region_from_ec2_url() {
+  local url="${EC2_URL:-}"
+  if [[ "${url}" =~ ec2\.([a-z0-9-]+)\. ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  return 1
+}
+
+# Source a c2rc.sh-style credentials file (K2 Cloud / CROC).
+# Expects exports: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, EC2_URL, S3_URL, ...
+source_cloud_rc() {
+  local rc_file="$1"
+  [[ -f "${rc_file}" ]] || die "Credentials file not found: ${rc_file}"
+
+  # shellcheck disable=SC1090
+  set -a
+  # shellcheck disable=SC1090
+  source "${rc_file}"
+  set +a
+
+  export CLOUD_PROVIDER="${CLOUD_PROVIDER:-k2}"
+  export AWS_EC2_METADATA_DISABLED="${AWS_EC2_METADATA_DISABLED:-true}"
+
+  # Map EC2_* aliases if AWS_* not set
+  if [[ -z "${AWS_ACCESS_KEY_ID:-}" && -n "${EC2_ACCESS_KEY:-}" ]]; then
+    export AWS_ACCESS_KEY_ID="${EC2_ACCESS_KEY}"
+  fi
+  if [[ -z "${AWS_SECRET_ACCESS_KEY:-}" && -n "${EC2_SECRET_KEY:-}" ]]; then
+    export AWS_SECRET_ACCESS_KEY="${EC2_SECRET_KEY}"
+  fi
+
+  [[ -n "${AWS_ACCESS_KEY_ID:-}" ]] || die "RC file did not set AWS_ACCESS_KEY_ID / EC2_ACCESS_KEY"
+  [[ -n "${AWS_SECRET_ACCESS_KEY:-}" ]] || die "RC file did not set AWS_SECRET_ACCESS_KEY / EC2_SECRET_KEY"
+
+  # Region: keep explicit AWS_REGION; else infer from EC2_URL; else ru-msk for K2
+  if [[ -z "${AWS_REGION:-}" ]]; then
+    local inferred=""
+    inferred="$(infer_region_from_ec2_url || true)"
+    if [[ -n "${inferred}" ]]; then
+      export AWS_REGION="${inferred}"
+    elif is_k2_cloud; then
+      export AWS_REGION="ru-msk"
+    fi
+  fi
+  export AWS_DEFAULT_REGION="${AWS_REGION}"
+
+  # Convenience: also expose AWS_ENDPOINT_URL_* for newer AWS CLI / SDKs
+  [[ -n "${EC2_URL:-}" ]] && export AWS_ENDPOINT_URL_EC2="${EC2_URL}"
+  [[ -n "${S3_URL:-}" ]] && export AWS_ENDPOINT_URL_S3="${S3_URL}"
+  [[ -n "${ELB_URL:-}" ]] && export AWS_ENDPOINT_URL_ELASTIC_LOAD_BALANCING_V2="${ELB_URL}"
+  [[ -n "${IAM_URL:-}" ]] && export AWS_ENDPOINT_URL_IAM="${IAM_URL}"
+  [[ -n "${ROUTE53_URL:-}" ]] && export AWS_ENDPOINT_URL_ROUTE_53="${ROUTE53_URL}"
+  [[ -n "${AUTO_SCALING_URL:-}" ]] && export AWS_ENDPOINT_URL_AUTO_SCALING="${AUTO_SCALING_URL}"
+  [[ -n "${AWS_CLOUDWATCH_URL:-}" ]] && export AWS_ENDPOINT_URL_CLOUDWATCH="${AWS_CLOUDWATCH_URL}"
+  [[ -n "${KMS_URL:-}" ]] && export AWS_ENDPOINT_URL_KMS="${KMS_URL}"
+  [[ -n "${SQS_URL:-}" ]] && export AWS_ENDPOINT_URL_SQS="${SQS_URL}"
+  [[ -n "${EFS_URL:-}" ]] && export AWS_ENDPOINT_URL_EFS="${EFS_URL}"
+  [[ -n "${EKS_URL:-}" ]] && export AWS_ENDPOINT_URL_EKS="${EKS_URL}"
+
+  log "Loaded credentials from ${rc_file}"
+  log "Project: ${C2_PROJECT:-unknown}  region: ${AWS_REGION}"
+  [[ -n "${EC2_URL:-}" ]] && log "EC2 endpoint: ${EC2_URL}"
+}
+
+# aws wrapper with optional --endpoint-url for a service.
+# Usage: aws_svc ec2 ec2 describe-vpcs ...
+#        aws_svc s3  s3api list-buckets ...
+#        aws_svc elb elbv2 describe-load-balancers ...
+#        aws_svc iam iam list-roles ...
+aws_svc() {
+  local kind="$1"; shift
+  local endpoint=""
+  case "${kind}" in
+    ec2)  endpoint="${EC2_URL:-}" ;;
+    s3)   endpoint="${S3_URL:-}" ;;
+    elb)  endpoint="${ELB_URL:-}" ;;
+    iam)  endpoint="${IAM_URL:-}" ;;
+    r53)  endpoint="${ROUTE53_URL:-}" ;;
+    *)    endpoint="" ;;
+  esac
+
+  local args=(--region "${AWS_REGION:-ru-msk}")
+  if [[ -n "${endpoint}" ]]; then
+    args+=(--endpoint-url "${endpoint}")
+  fi
+  aws "${args[@]}" "$@"
+}
+
+# Validate that credentials work (STS on AWS; EC2 Describe on K2).
+verify_cloud_credentials() {
+  if is_k2_cloud; then
+    log "Validating K2 Cloud credentials via EC2..."
+    aws_svc ec2 ec2 describe-vpcs --output text >/dev/null \
+      || die "Cannot reach ${EC2_URL:-EC2}. Check c2rc credentials / network."
+    export DISCOVERED_ACCOUNT_ID="${C2_PROJECT:-k2}"
+    log "OK — project ${DISCOVERED_ACCOUNT_ID}"
+  else
+    log "Validating AWS credentials..."
+    aws sts get-caller-identity --output table \
+      || die "Cannot authenticate. Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or --rc c2rc.sh)."
+    export DISCOVERED_ACCOUNT_ID
+    DISCOVERED_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+  fi
+}
+
+# Emit Terraform provider "aws" block for current env (K2 endpoints when set).
+# Writes to stdout.
+emit_provider_tf() {
+  local region="${AWS_REGION:-ru-msk}"
+
+  cat <<EOF
+terraform {
+  required_version = ">= 1.5.0"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region     = "${region}"
+  access_key = var.aws_access_key_id
+  secret_key = var.aws_secret_access_key
+
+  # Compatible clouds (K2) and custom endpoints
+  skip_credentials_validation = ${IS_COMPAT_CLOUD:-false}
+  skip_metadata_api_check     = true
+  skip_region_validation      = ${IS_COMPAT_CLOUD:-false}
+  skip_requesting_account_id  = ${IS_COMPAT_CLOUD:-false}
+  s3_use_path_style           = ${IS_COMPAT_CLOUD:-false}
+EOF
+
+  if is_k2_cloud; then
+    cat <<EOF
+
+  endpoints {
+EOF
+    [[ -n "${EC2_URL:-}" ]] && printf '    ec2            = "%s"\n' "${EC2_URL}"
+    [[ -n "${S3_URL:-}" ]] && printf '    s3             = "%s"\n' "${S3_URL}"
+    [[ -n "${ELB_URL:-}" ]] && printf '    elbv2          = "%s"\n' "${ELB_URL}"
+    [[ -n "${IAM_URL:-}" ]] && printf '    iam            = "%s"\n' "${IAM_URL}"
+    [[ -n "${ROUTE53_URL:-}" ]] && printf '    route53        = "%s"\n' "${ROUTE53_URL}"
+    [[ -n "${AUTO_SCALING_URL:-}" ]] && printf '    autoscaling    = "%s"\n' "${AUTO_SCALING_URL}"
+    [[ -n "${AWS_CLOUDWATCH_URL:-}" ]] && printf '    cloudwatch     = "%s"\n' "${AWS_CLOUDWATCH_URL}"
+    [[ -n "${DIRECT_CONNECT_URL:-}" ]] && printf '    directconnect  = "%s"\n' "${DIRECT_CONNECT_URL}"
+    [[ -n "${EFS_URL:-}" ]] && printf '    efs            = "%s"\n' "${EFS_URL}"
+    [[ -n "${EKS_URL:-}" ]] && printf '    eks            = "%s"\n' "${EKS_URL}"
+    [[ -n "${KMS_URL:-}" ]] && printf '    kms            = "%s"\n' "${KMS_URL}"
+    [[ -n "${SQS_URL:-}" ]] && printf '    sqs            = "%s"\n' "${SQS_URL}"
+    [[ -n "${BACKUP_URL:-}" ]] && printf '    backup         = "%s"\n' "${BACKUP_URL}"
+    cat <<'EOF'
+  }
+EOF
+  fi
+
+  cat <<'EOF'
+}
+
+variable "aws_access_key_id" {
+  type        = string
+  sensitive   = true
+  description = "Cloud access key (from c2rc / AWS)"
+}
+
+variable "aws_secret_access_key" {
+  type        = string
+  sensitive   = true
+  description = "Cloud secret key (from c2rc / AWS)"
+}
+EOF
+}
+
+# Write terraform.tfvars with keys (gitignored via *.tfvars).
+write_tfvars() {
+  local dir="$1"
+  cat > "${dir}/terraform.tfvars" <<EOF
+# Generated from c2rc / environment — do not commit
+aws_access_key_id     = "${AWS_ACCESS_KEY_ID}"
+aws_secret_access_key = "${AWS_SECRET_ACCESS_KEY}"
+EOF
+  log "Wrote ${dir}/terraform.tfvars (gitignored)"
 }

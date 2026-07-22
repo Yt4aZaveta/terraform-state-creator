@@ -3,9 +3,10 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-AWS_REGION ?= eu-central-1
+AWS_REGION ?=
 WORK_DIR   ?= imported
-SERVICES   ?= vpc,subnet,route_table,igw,nat,eip,sg,ec2,ebs,s3,rds,dynamodb,lambda,elb
+SERVICES   ?=
+RC         ?=
 
 .PHONY: help collect collect-dry discover main-tf main-tf-dump check
 
@@ -13,33 +14,34 @@ help: ## Show targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  %-16s %s\n", $$1, $$2}'
 
-collect: ## Scan AWS → local state + main.tf
+collect: ## Scan cloud → local state + main.tf (RC=./c2rc.sh)
 	./scripts/collect-aws-state.sh \
-		-r $(AWS_REGION) \
-		-s $(SERVICES) \
+		$(if $(RC),--rc $(RC)) \
+		$(if $(AWS_REGION),-r $(AWS_REGION)) \
+		$(if $(SERVICES),-s $(SERVICES)) \
 		-w $(WORK_DIR) \
 		--auto-approve
 
-collect-dry: ## Dry-run collect (no AWS / no terraform apply)
+collect-dry: ## Dry-run collect (no API)
 	./scripts/collect-aws-state.sh \
-		-r $(AWS_REGION) \
-		-s $(SERVICES) \
+		$(if $(RC),--rc $(RC)) \
 		-w $(WORK_DIR) \
 		-n
 
-discover: ## Only scan AWS and write inventory JSON
+discover: ## Only write inventory.json
 	./scripts/discover-aws-resources.sh \
-		-r $(AWS_REGION) \
-		-s $(SERVICES) \
+		$(if $(RC),--rc $(RC)) \
+		$(if $(AWS_REGION),-r $(AWS_REGION)) \
+		$(if $(SERVICES),-s $(SERVICES)) \
 		-o $(WORK_DIR)/inventory.json
 
-main-tf: ## Rebuild main.tf from local state (live generate if AWS available)
+main-tf: ## Rebuild main.tf from local state
 	./scripts/state-to-main-tf.sh -w $(WORK_DIR)
 
 main-tf-dump: ## Rebuild main.tf offline from state JSON
 	./scripts/state-to-main-tf.sh -w $(WORK_DIR) --dump
 
-check: ## Validate shell scripts (bash -n)
+check: ## Validate shell scripts
 	bash -n scripts/lib/common.sh
 	bash -n scripts/discover-aws-resources.sh
 	bash -n scripts/collect-aws-state.sh

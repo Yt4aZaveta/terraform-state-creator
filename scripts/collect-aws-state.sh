@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # One-command flow:
-#   credentials → validate → scan AWS → generate Terraform import blocks →
-#   generate config → import into LOCAL state → assemble main.tf
+#   c2rc / credentials → scan cloud → import into LOCAL state → assemble main.tf
 #
-# Usage:
-#   export AWS_ACCESS_KEY_ID=...
-#   export AWS_SECRET_ACCESS_KEY=...
-#   export AWS_REGION=eu-central-1
+# K2 Cloud example:
+#   ./scripts/collect-aws-state.sh --rc ./c2rc.sh --auto-approve
+#
+# AWS example:
+#   export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_REGION=eu-central-1
 #   ./scripts/collect-aws-state.sh --auto-approve
 set -euo pipefail
 
@@ -15,9 +15,10 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # shellcheck source=lib/common.sh
 source "${SCRIPT_DIR}/lib/common.sh"
 
-AWS_REGION="${AWS_REGION:-eu-central-1}"
-SERVICES="${SERVICES:-vpc,subnet,route_table,igw,nat,eip,sg,ec2,ebs,s3,rds,dynamodb,lambda,elb}"
+AWS_REGION="${AWS_REGION:-}"
+SERVICES="${SERVICES:-}"
 WORK_DIR="${WORK_DIR:-${ROOT_DIR}/imported}"
+RC_FILE=""
 DRY_RUN=false
 SKIP_IMPORT=false
 AUTO_APPROVE=false
@@ -28,36 +29,33 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [options]
 
-Scan existing AWS resources and build a local Terraform project:
+Scan existing cloud resources and build a local Terraform project:
   inventory.json + terraform.tfstate + main.tf
 
-Ideal flow:
-  1. Put AWS credentials in the environment (or ~/.aws/credentials)
-  2. Run this script
-  3. Commit imported/main.tf and imported/terraform.tfstate to git
+K2 Cloud (c2rc.sh):
+  ./scripts/collect-aws-state.sh --rc ./c2rc.sh --auto-approve
+
+AWS:
+  export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+  ./scripts/collect-aws-state.sh --auto-approve
 
 Options:
-  -r, --region REGION       AWS region (default: ${AWS_REGION})
-  -s, --services LIST       Services to scan (default: common set; or "all")
-  -w, --work-dir DIR        Where to write Terraform project (default: ./imported)
-  --skip-import             Only discover + write import blocks (no terraform)
+  -c, --rc FILE             Source c2rc.sh-style credentials (K2 Cloud)
+  -r, --region REGION       Region (default: from c2rc URL, else eu-central-1)
+  -s, --services LIST       Services to scan (default: cloud-aware set; or "all")
+  -w, --work-dir DIR        Output dir (default: ./imported)
+  --skip-import             Only discover + write import blocks
   --keep-imports            Keep imports.tf after successful import
-  --auto-approve            Pass -auto-approve to terraform apply
-  --no-install-deps         Do not attempt to install missing aws/terraform
-  -n, --dry-run             Fake discovery; do not call AWS / terraform apply
+  --auto-approve            terraform apply -auto-approve
+  --no-install-deps         Do not auto-install aws/terraform
+  -n, --dry-run             Fake discovery; no API / no apply
   -h, --help                Show help
-
-Credentials (any standard AWS method):
-  export AWS_ACCESS_KEY_ID=...
-  export AWS_SECRET_ACCESS_KEY=...
-  export AWS_SESSION_TOKEN=...          # if using temporary creds
-  export AWS_REGION=${AWS_REGION}
-  # or: aws configure / AWS_PROFILE=...
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    -c|--rc)             RC_FILE="$2"; shift 2 ;;
     -r|--region)         AWS_REGION="$2"; shift 2 ;;
     -s|--services)       SERVICES="$2"; shift 2 ;;
     -w|--work-dir)       WORK_DIR="$2"; shift 2 ;;
@@ -67,17 +65,25 @@ while [[ $# -gt 0 ]]; do
     --no-install-deps)   INSTALL_DEPS=false; shift ;;
     -n|--dry-run)        DRY_RUN=true; shift ;;
     -h|--help)           usage; exit 0 ;;
-    # Deprecated flags kept for compatibility (ignored)
-    -b|--bucket|-t|--table|--state-key|--skip-backend) shift 2 2>/dev/null || shift ;;
     *) die "Unknown option: $1" ;;
   esac
 done
 
+if [[ -n "${RC_FILE}" ]]; then
+  source_cloud_rc "${RC_FILE}"
+fi
+
+# Region fallback when not set by rc / flag / env
+if [[ -z "${AWS_REGION}" ]]; then
+  if is_k2_cloud; then
+    AWS_REGION="ru-msk"
+  else
+    AWS_REGION="eu-central-1"
+  fi
+fi
 export AWS_REGION
 export AWS_DEFAULT_REGION="${AWS_REGION}"
 
-# ---------------------------------------------------------------------------
-# Dependency helpers
 # ---------------------------------------------------------------------------
 install_aws_cli() {
   log "Installing AWS CLI v2..."
@@ -140,9 +146,6 @@ ensure_deps() {
   fi
 }
 
-# ---------------------------------------------------------------------------
-# Write Terraform project from inventory
-# ---------------------------------------------------------------------------
 write_terraform_project() {
   local inventory="$1"
   local dir="$2"
@@ -150,25 +153,30 @@ write_terraform_project() {
   mkdir -p "${dir}"
   rm -f "${dir}/imports.tf" "${dir}/provider.tf" "${dir}/backend.tf" \
         "${dir}/backend.hcl" "${dir}/generated_resources.tf" \
-        "${dir}/main.tf" "${dir}/.terraform.lock.hcl" "${dir}/import.tfplan"
+        "${dir}/main.tf" "${dir}/.terraform.lock.hcl" "${dir}/import.tfplan" \
+        "${dir}/terraform.tfvars"
   rm -rf "${dir}/.terraform"
 
-  cat > "${dir}/provider.tf" <<EOF
-terraform {
-  required_version = ">= 1.5.0"
+  if is_k2_cloud; then
+    export IS_COMPAT_CLOUD=true
+  else
+    export IS_COMPAT_CLOUD=false
+  fi
+  emit_provider_tf > "${dir}/provider.tf"
+  write_tfvars "${dir}"
 
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
-    }
-  }
-}
-
-provider "aws" {
-  region = "${AWS_REGION}"
-}
-EOF
+  # Save a copy of endpoints/meta for later regenerations (no secrets)
+  jq -n \
+    --arg cloud "$(is_k2_cloud && echo k2 || echo aws)" \
+    --arg region "${AWS_REGION}" \
+    --arg project "${C2_PROJECT:-}" \
+    --arg ec2 "${EC2_URL:-}" \
+    --arg s3 "${S3_URL:-}" \
+    --arg elb "${ELB_URL:-}" \
+    --arg iam "${IAM_URL:-}" \
+    '{cloud:$cloud, region:$region, project:$project,
+      endpoints:{ec2:$ec2, s3:$s3, elb:$elb, iam:$iam}}' \
+    > "${dir}/cloud.json"
 
   {
     echo "# AUTO-GENERATED import blocks — removed after successful import"
@@ -207,13 +215,12 @@ assemble_main_tf() {
   {
     cat <<'EOF'
 # =============================================================================
-# main.tf — assembled from live AWS resources (terraform -generate-config-out)
+# main.tf — assembled from live cloud resources (terraform -generate-config-out)
 # Review and tidy before relying on plan/apply. Nested blocks may need edits.
 # Regenerated by: scripts/collect-aws-state.sh  or  scripts/state-to-main-tf.sh
 # =============================================================================
 
 EOF
-    # Drop leading terraform/provider blocks if generate-config-out ever emits them
     sed -E '/^[[:space:]]*terraform[[:space:]]*\{/,/^[[:space:]]*\}/d; /^[[:space:]]*provider[[:space:]]+"/,/^[[:space:]]*\}/d' "${src}"
   } > "${out}"
 
@@ -236,7 +243,7 @@ run_terraform_import() {
     return 0
   fi
 
-  log "Generating Terraform config from live AWS resources..."
+  log "Generating Terraform config from live cloud resources..."
   set +e
   terraform plan -generate-config-out=generated_resources.tf -input=false -out=import.tfplan
   local plan_rc=$?
@@ -265,12 +272,11 @@ run_terraform_import() {
     terraform apply "${apply_flags[@]}" import.tfplan
   fi
 
-  # Import blocks are one-shot — archive unless asked to keep
   if [[ "${KEEP_IMPORTS}" != true ]]; then
     mkdir -p .import-archive
     mv -f imports.tf .import-archive/imports.tf
     rm -f import.tfplan
-    log "Archived imports.tf → .import-archive/ (one-time import complete)"
+    log "Archived imports.tf → .import-archive/"
   fi
 
   log "State summary:"
@@ -280,43 +286,39 @@ run_terraform_import() {
 }
 
 # ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-log "AWS region: ${AWS_REGION}"
+log "Region: ${AWS_REGION}"
 log "State storage: local (${WORK_DIR}/terraform.tfstate)"
+is_k2_cloud && log "Cloud: K2 (custom endpoints from c2rc)"
 ensure_deps
 
 if [[ "${DRY_RUN}" != true ]]; then
-  log "Validating AWS credentials..."
-  aws sts get-caller-identity --output table \
-    || die "Cannot authenticate. Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or AWS_PROFILE)."
+  verify_cloud_credentials
 fi
 
 mkdir -p "${WORK_DIR}"
 
-# 1) Discover
-log "Step 1/3 — scan AWS resources (${SERVICES})..."
+log "Step 1/3 — scan cloud resources..."
 INVENTORY="${WORK_DIR}/inventory.json"
-DISCOVER_ARGS=(-r "${AWS_REGION}" -s "${SERVICES}" -o "${INVENTORY}")
+DISCOVER_ARGS=(-r "${AWS_REGION}" -o "${INVENTORY}")
+[[ -n "${SERVICES}" ]] && DISCOVER_ARGS+=(-s "${SERVICES}")
+[[ -n "${RC_FILE}" ]] && DISCOVER_ARGS+=(-c "${RC_FILE}")
 [[ "${DRY_RUN}" == true ]] && DISCOVER_ARGS+=(-n)
+# Env from sourced rc is inherited; -c re-sources inside discover for safety
 "${SCRIPT_DIR}/discover-aws-resources.sh" "${DISCOVER_ARGS[@]}"
 
 COUNT="$(jq '.resource_count' "${INVENTORY}")"
 log "Found ${COUNT} resources"
 
-# 2) Generate Terraform project
 log "Step 2/3 — write Terraform project into ${WORK_DIR}..."
 write_terraform_project "${INVENTORY}" "${WORK_DIR}"
 
-# 3) Import → local state + main.tf
 if [[ "${SKIP_IMPORT}" == true || "${DRY_RUN}" == true ]]; then
   log "Step 3/3 — skipped terraform import (dry-run or --skip-import)"
   if [[ "${DRY_RUN}" == true ]]; then
-    # Placeholder main.tf so the layout is clear without AWS
     cat > "${WORK_DIR}/main.tf" <<'EOF'
 # =============================================================================
 # main.tf — placeholder (dry-run)
-# After a real run this file contains resource blocks generated from AWS.
+# After a real run this file contains resource blocks generated from the cloud.
 # =============================================================================
 
 # resource "aws_vpc" "example" { ... }
@@ -324,7 +326,7 @@ EOF
     log "Wrote ${WORK_DIR}/main.tf (dry-run placeholder)"
   fi
 else
-  log "Step 3/3 — import resources into local state and build main.tf..."
+  log "Step 3/3 — import into local state and build main.tf..."
   run_terraform_import "${WORK_DIR}"
 fi
 
@@ -332,22 +334,19 @@ cat <<EOF
 
 Done.
 
-What you have now (ready for git):
+What you have now (ready for git — except secrets):
   • Inventory:   ${WORK_DIR}/inventory.json
   • Provider:    ${WORK_DIR}/provider.tf
   • Code:        ${WORK_DIR}/main.tf
   • Local state: ${WORK_DIR}/terraform.tfstate
+  • Secrets:     ${WORK_DIR}/terraform.tfvars   (gitignored)
+
+Usage:
+  ./scripts/collect-aws-state.sh --rc ./c2rc.sh --auto-approve
 
 Next:
   cd ${WORK_DIR}
   terraform state list
   terraform plan
-  # edit main.tf as needed, then commit main.tf + terraform.tfstate
-
-Rebuild main.tf from state later:
-  ./scripts/state-to-main-tf.sh -w ${WORK_DIR}
-
-Tips:
-  • Narrow the scan:  ./scripts/collect-aws-state.sh -s vpc,subnet,ec2
-  • Full-ish scan:    ./scripts/collect-aws-state.sh -s all
+  # commit main.tf provider.tf terraform.tfstate — NOT terraform.tfvars / c2rc.sh
 EOF

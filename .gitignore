@@ -15,12 +15,16 @@ import.tfplan
 # One-shot import leftovers
 **/.import-archive/
 
-# Secrets
+# Secrets / local overrides
 *.tfvars
 !*.tfvars.example
 .env
 .env.*
 !.env.example
+c2rc.sh
+*c2rc*.sh
+!templates/c2rc.sh.example
+!**/c2rc.sh.example
 
 # Optional remote-backend leftovers (not used by default)
 generated/
