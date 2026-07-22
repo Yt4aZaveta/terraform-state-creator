@@ -92,12 +92,46 @@ BLOCK_ATTRS: frozenset[str] = frozenset(
 NESTED_DROP: frozenset[str] = frozenset(
     {
         "volume_id",
+        "device_name",  # computed on rockitcloud root_block_device
         "network_interface_id",
         "association_id",
         "allocation_id",
         "ipv6_cidr_block_association_id",
     }
 )
+
+# Nested blocks to omit entirely for a resource type (schema differs / separate resources).
+# Volumes are imported as aws_ebs_volume; rockitcloud marks root device_name as computed.
+OMIT_BLOCKS_BY_TYPE: dict[str, frozenset[str]] = {
+    "aws_instance": frozenset(
+        {
+            "root_block_device",
+            "ebs_block_device",
+            "ephemeral_block_device",
+            "network_interface",
+            "capacity_reservation_specification",
+            "credit_specification",
+            "enclave_options",
+            "launch_template",
+            "maintenance_options",
+            "metadata_options",
+        }
+    ),
+    # Inline S3 sub-resources are deprecated and often incomplete on K2
+    "aws_s3_bucket": frozenset(
+        {
+            "versioning",
+            "grant",
+            "cors_rule",
+            "lifecycle_rule",
+            "logging",
+            "object_lock_configuration",
+            "replication_configuration",
+            "server_side_encryption_configuration",
+            "website",
+        }
+    ),
+}
 
 # Attribute pairs that conflict when both are set.
 # Value is skipped when the "other" key is present and non-empty.
@@ -238,12 +272,15 @@ def should_skip_attr(key: str, value: Any, attrs: dict[str, Any]) -> bool:
 
 def resource_lines(rtype: str, name: str, attrs: dict[str, Any]) -> list[str]:
     lines = [f'resource "{rtype}" "{name}" {{']
+    omit_blocks = OMIT_BLOCKS_BY_TYPE.get(rtype, frozenset())
 
     # Prefer name over empty name_prefix (already handled by should_skip)
     keys = sorted(attrs.keys())
     for key in keys:
         value = attrs[key]
         if should_skip_attr(key, value, attrs):
+            continue
+        if key in omit_blocks:
             continue
 
         if key in BLOCK_ATTRS:
@@ -279,10 +316,11 @@ def resource_lines(rtype: str, name: str, attrs: dict[str, Any]) -> list[str]:
 
         lines.append(f"  {key} = {emit_value(value, 1)}")
 
-    # Instance + separate volumes: ignore block-device drift after omit/scrub
-    if rtype == "aws_instance":
+    # Ignore omitted nested state so plan does not try to clear them
+    if omit_blocks:
+        ignore = ", ".join(sorted(omit_blocks))
         lines.append("  lifecycle {")
-        lines.append("    ignore_changes = [root_block_device, ebs_block_device, network_interface]")
+        lines.append(f"    ignore_changes = [{ignore}]")
         lines.append("  }")
 
     lines.append("}")
