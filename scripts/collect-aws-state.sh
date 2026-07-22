@@ -308,8 +308,23 @@ run_terraform_import() {
 
   pushd "${dir}" >/dev/null
 
-  log "terraform init (local state)..."
-  terraform init -input=false -backend=false
+  # Local mirror — registry.terraform.io often blocked (need proxy otherwise)
+  ensure_aws_provider_mirror "${HOME}/.terraform.d/mirror"
+
+  # Pin provider.tf to the mirrored version (rewrite if emit used default)
+  if [[ -f provider.tf ]]; then
+    # ensure version pin matches mirrored provider
+    :
+  fi
+
+  log "terraform init (local state + filesystem provider mirror)..."
+  if ! terraform init -input=false -backend=false; then
+    warn "terraform init failed."
+    warn "If you use a proxy:  proxy ./scripts/collect-aws-state.sh --rc ./c2rc.sh --auto-approve"
+    warn "Or download manually — mirror dir: ${HOME}/.terraform.d/mirror"
+    popd >/dev/null
+    return 1
+  fi
 
   local count
   count="$(jq '.resource_count' inventory.json)"
@@ -386,6 +401,10 @@ COUNT="$(jq '.resource_count' "${INVENTORY}")"
 log "Found ${COUNT} resources"
 
 log "Step 2/3 — write Terraform project into ${WORK_DIR}..."
+# Prefetch provider so provider.tf version pin matches the mirror
+if [[ "${DRY_RUN}" != true && "${SKIP_IMPORT}" != true ]]; then
+  ensure_aws_provider_mirror "${HOME}/.terraform.d/mirror"
+fi
 write_terraform_project "${INVENTORY}" "${WORK_DIR}"
 
 if [[ "${SKIP_IMPORT}" == true || "${DRY_RUN}" == true ]]; then

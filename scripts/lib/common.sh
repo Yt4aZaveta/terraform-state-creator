@@ -150,7 +150,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "= ${AWS_PROVIDER_VERSION:-5.100.0}"
     }
   }
 }
@@ -217,4 +217,71 @@ aws_access_key_id     = "${AWS_ACCESS_KEY_ID}"
 aws_secret_access_key = "${AWS_SECRET_ACCESS_KEY}"
 EOF
   log "Wrote ${dir}/terraform.tfvars (gitignored)"
+}
+
+# Detect OS/arch for provider binaries (sets TF_OS, TF_ARCH).
+detect_tf_platform() {
+  local os arch
+  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  arch="$(uname -m)"
+  case "${arch}" in
+    x86_64|amd64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    *) die "Unsupported architecture: ${arch}" ;;
+  esac
+  case "${os}" in
+    linux|darwin) ;;
+    *) die "Unsupported OS: ${os}" ;;
+  esac
+  TF_OS="${os}"
+  TF_ARCH="${arch}"
+}
+
+# Download hashicorp/aws into a local filesystem mirror and point Terraform at it.
+# Avoids registry.terraform.io (often blocked without proxy).
+# Sets: TF_CLI_CONFIG_FILE, AWS_PROVIDER_VERSION
+ensure_aws_provider_mirror() {
+  local mirror_root="${1:-${HOME}/.terraform.d/mirror}"
+  local ver="${AWS_PROVIDER_VERSION:-5.100.0}"
+  detect_tf_platform
+
+  local dest_dir="${mirror_root}/registry.terraform.io/hashicorp/aws/${ver}/${TF_OS}_${TF_ARCH}"
+  local url="https://releases.hashicorp.com/terraform-provider-aws/${ver}/terraform-provider-aws_${ver}_${TF_OS}_${TF_ARCH}.zip"
+
+  if [[ ! -d "${dest_dir}" ]] || [[ -z "$(find "${dest_dir}" -type f -name 'terraform-provider-aws*' 2>/dev/null | head -1)" ]]; then
+    log "Downloading hashicorp/aws ${ver} (${TF_OS}_${TF_ARCH}) into local mirror..."
+    log "URL: ${url}"
+    local tmp
+    tmp="$(mktemp -d)"
+    if ! curl -fsSL "${url}" -o "${tmp}/provider.zip"; then
+      rm -rf "${tmp}"
+      die "Cannot download AWS provider from releases.hashicorp.com.
+  • With proxy:  proxy ./scripts/collect-aws-state.sh --rc ./c2rc.sh --auto-approve
+  • Or:          HTTPS_PROXY=socks5://127.0.0.1:7897 ./scripts/collect-aws-state.sh ..."
+    fi
+    have unzip || die "unzip is required"
+    mkdir -p "${dest_dir}"
+    unzip -qo "${tmp}/provider.zip" -d "${dest_dir}"
+    chmod +x "${dest_dir}"/terraform-provider-aws* 2>/dev/null || true
+    rm -rf "${tmp}"
+    log "Installed provider → ${dest_dir}"
+  else
+    log "Using cached provider mirror: ${dest_dir}"
+  fi
+
+  local rc_file="${mirror_root}/terraform.rc"
+  cat > "${rc_file}" <<EOF
+provider_installation {
+  filesystem_mirror {
+    path    = "${mirror_root}"
+    include = ["registry.terraform.io/hashicorp/aws"]
+  }
+  direct {
+    exclude = ["registry.terraform.io/hashicorp/aws"]
+  }
+}
+EOF
+  export TF_CLI_CONFIG_FILE="${rc_file}"
+  export AWS_PROVIDER_VERSION="${ver}"
+  log "TF_CLI_CONFIG_FILE=${TF_CLI_CONFIG_FILE}"
 }

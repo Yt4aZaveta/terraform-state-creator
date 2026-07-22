@@ -56,7 +56,7 @@ fi
 # Default services: K2-oriented set when endpoints present
 if [[ -z "${SERVICES}" ]]; then
   if is_k2_cloud; then
-    SERVICES="vpc,subnet,route_table,igw,nat,eip,sg,ec2,ebs,s3,elb"
+    SERVICES="vpc,subnet,route_table,igw,eip,sg,ec2,ebs,s3,elb"
   else
     SERVICES="vpc,subnet,route_table,igw,nat,eip,sg,ec2,ebs,s3,rds,dynamodb,lambda,elb"
   fi
@@ -64,7 +64,7 @@ fi
 
 if [[ "${SERVICES}" == "all" ]]; then
   if is_k2_cloud; then
-    SERVICES="vpc,subnet,route_table,igw,nat,eip,sg,ec2,ebs,s3,elb,iam_role"
+    SERVICES="vpc,subnet,route_table,igw,eip,sg,ec2,ebs,s3,elb,iam_role"
   else
     SERVICES="vpc,subnet,route_table,igw,nat,eip,sg,ec2,ebs,s3,rds,dynamodb,lambda,elb,iam_role"
   fi
@@ -151,14 +151,18 @@ discover_live() {
   fi
 
   if want nat; then
-    log "Scanning NAT gateways..."
-    local ids
-    ids="$(safe_aws aws_svc ec2 ec2 describe-nat-gateways \
-      --filter Name=state,Values=available \
-      --query 'NatGateways[].NatGatewayId' --output text || true)"
-    for id in ${ids:-}; do
-      [[ -n "${id}" && "${id}" != "None" ]] && add_resource "aws_nat_gateway" "${id}" "nat"
-    done
+    if is_k2_cloud; then
+      warn "Skipping NAT gateways (not supported on K2 Cloud)"
+    else
+      log "Scanning NAT gateways..."
+      local ids
+      ids="$(safe_aws aws_svc ec2 ec2 describe-nat-gateways \
+        --filter Name=state,Values=available \
+        --query 'NatGateways[].NatGatewayId' --output text || true)"
+      for id in ${ids:-}; do
+        [[ -n "${id}" && "${id}" != "None" ]] && add_resource "aws_nat_gateway" "${id}" "nat"
+      done
+    fi
   fi
 
   if want eip; then

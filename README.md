@@ -70,7 +70,13 @@ make collect-dry
 make main-tf
 ```
 
-## Требования
+## Если registry.terraform.io недоступен
 
-- `jq`, `aws` CLI, `terraform` ≥ 1.5 (могут установиться сами)
-- Файл `c2rc.sh` или обычные `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
+Скрипт качает `hashicorp/aws` напрямую с `releases.hashicorp.com` в локальный mirror
+(`~/.terraform.d/mirror`) и не ходит в registry.
+
+Если и releases недоступны — запускайте через proxy:
+
+```bash
+proxy ./scripts/collect-aws-state.sh --rc ./c2rc.sh --auto-approve
+```
