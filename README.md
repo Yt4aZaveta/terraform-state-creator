@@ -1,109 +1,118 @@
 # terraform-state-creator
 
-Создаёт remote state для Terraform в AWS через **AWS CLI**: S3-бакет (хранилище state) и DynamoDB-таблицу (блокировки). После этого любой Terraform-проект может управлять инфраструктурой, читая и записывая state в этот backend.
+Сканирует существующую инфраструктуру в AWS и собирает **Terraform state**, с которым дальше можно работать через `terraform plan` / `apply`.
 
-## Что создаётся
+Идеальный сценарий: записать креды → запустить одну команду → получить конфиги + remote state в S3.
 
-| Ресурс | Назначение |
-|--------|------------|
-| **S3 bucket** | Файл `*.tfstate` с версионированием и шифрованием |
-| **DynamoDB table** | Блокировки state при параллельных `apply` |
+## Что получается
 
-Дополнительно на бакет включаются: versioning, SSE-S3, Block Public Access, deny non-TLS policy.
+| Артефакт | Описание |
+|----------|----------|
+| `imported/inventory.json` | Список найденных ресурсов (ID, тип) |
+| `imported/imports.tf` | Terraform `import` blocks |
+| `imported/generated_resources.tf` | HCL, сгенерированный из live AWS |
+| `imported/terraform.tfstate` или S3 | State со всеми импортированными ресурсами |
+| S3 + DynamoDB | Remote backend для дальнейшей работы |
+
+## Быстрый старт (креды → state)
+
+```bash
+# 1. Креды
+export AWS_ACCESS_KEY_ID="AKIA..."
+export AWS_SECRET_ACCESS_KEY="..."
+export AWS_REGION="eu-central-1"
+# или: aws configure
+# или: cp .env.example .env  →  set -a && source .env && set +a
+
+# 2. Одна команда
+./scripts/collect-aws-state.sh --auto-approve
+
+# или
+make collect
+```
+
+Скрипт:
+
+1. Проверит креды (`sts get-caller-identity`)
+2. Создаст S3 bucket + DynamoDB lock (remote state)
+3. Просканирует AWS (VPC, subnet, SG, EC2, S3, RDS, DynamoDB, Lambda, LB, …)
+4. Сгенерирует Terraform-проект в `imported/`
+5. Импортирует ресурсы в state (`terraform plan -generate-config-out` + `apply`)
+6. Положит state в S3
+
+## Что сканируется по умолчанию
+
+`vpc`, `subnet`, `route_table`, `igw`, `nat`, `eip`, `sg`, `ec2`, `ebs`, `s3`, `rds`, `dynamodb`, `lambda`, `elb`
+
+```bash
+# только сеть и EC2
+./scripts/collect-aws-state.sh -s vpc,subnet,sg,ec2 --auto-approve
+
+# расширенный набор (+ IAM roles, до 100 шт.)
+./scripts/collect-aws-state.sh -s all --auto-approve
+```
+
+Бакет state и lock-таблица из скана исключаются автоматически.
+
+## Только backend (без импорта)
+
+Если нужен лишь «сейф» для state без сканирования:
+
+```bash
+./scripts/create-terraform-state.sh -r eu-central-1
+# → generated/backend.hcl
+```
 
 ## Требования
 
-- [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)
+- AWS credentials с правом читать ресурсы + создавать S3/DynamoDB
 - `jq`
-- Настроенные AWS-credentials (`aws configure` / `AWS_PROFILE` / env)
-- Права: `s3:*` (на бакет), `dynamodb:CreateTable` / `DescribeTable`, `sts:GetCallerIdentity`
-- Для примера: [Terraform](https://developer.hashicorp.com/terraform/install) ≥ 1.5
-
-## Быстрый старт
-
-```bash
-# 1. Создать backend (имя бакета можно не указывать — сгенерируется)
-./scripts/create-terraform-state.sh -r eu-central-1
-
-# или явно:
-./scripts/create-terraform-state.sh \
-  -b my-org-tfstate \
-  -t terraform-state-lock \
-  -r eu-central-1
-
-# 2. В своём Terraform-проекте:
-terraform {
-  backend "s3" {}
-}
-
-# 3. Инициализация с конфигом из generated/
-terraform init -backend-config=./generated/backend.hcl
-terraform plan
-terraform apply
-```
-
-Через Make:
-
-```bash
-make create AWS_REGION=eu-central-1
-# или
-make create STATE_BUCKET=my-org-tfstate AWS_REGION=eu-central-1
-```
+- `aws` CLI и `terraform` ≥ 1.5 (скрипт попробует поставить их сам, если нет `--no-install-deps`)
 
 ## Структура
 
 ```
 scripts/
-  create-terraform-state.sh   # bootstrap S3 + DynamoDB
-  destroy-terraform-state.sh  # удаление backend (осторожно!)
-templates/
-  backend.hcl.example         # шаблон backend-конфига
-examples/infra/               # минимальный consumer с remote state
-generated/                    # появляется после create (в .gitignore)
-  backend.hcl
-  backend.json
+  collect-aws-state.sh          # главная команда: креды → state
+  discover-aws-resources.sh     # только сканирование → inventory.json
+  create-terraform-state.sh     # только S3 + DynamoDB backend
+  destroy-terraform-state.sh
+  lib/common.sh
+imported/                       # результат collect (в .gitignore)
+generated/                      # backend.hcl (в .gitignore)
+.env.example
 ```
 
-## Пример инфраструктуры
-
-Каталог `examples/infra` — простой root module (SSM Parameter), который использует созданный backend:
+## После импорта
 
 ```bash
-make create STATE_BUCKET=my-org-tfstate
-make example-init
-make example-plan
-cd examples/infra && terraform apply
+cd imported
+terraform state list
+terraform plan          # ожидайте пустой plan или небольшой drift
+# дальше меняете .tf и управляете инфраструктурой как обычно
 ```
 
-State будет лежать в `s3://my-org-tfstate/infrastructure/terraform.tfstate`.
+## Важно
 
-Ключ state (`key`) можно менять в `backend.hcl` — например `envs/prod/network.tfstate` для разных стеков.
+- Импорт **не пересоздаёт** ресурсы — только берёт их под управление Terraform.
+- Сгенерированный HCL стоит ревьюить: иногда нужны правки (особенно SG rules, IAM).
+- Повторный запуск на уже импортированный каталог может конфликтовать — используйте новый `-w` или очистите state.
+- Аккаунты с тысячами ресурсов: сужайте `-s` или фильтруйте вручную по `inventory.json`.
 
-## Удаление backend
+## Make
 
 ```bash
-./scripts/destroy-terraform-state.sh -b my-org-tfstate -r eu-central-1
+make collect              # полный цикл
+make collect-dry          # без AWS / без apply
+make discover             # только inventory
+make create               # только backend
+make check                # синтаксис скриптов
+```
+
+## Dry-run без облака
+
+```bash
+./scripts/collect-aws-state.sh -n
 # или
-make destroy STATE_BUCKET=my-org-tfstate
-```
-
-Удаляет все версии объектов в бакете и DynamoDB-таблицу. Делайте это только когда state больше не нужен.
-
-## Переменные окружения
-
-| Переменная | Описание | Default |
-|------------|----------|---------|
-| `AWS_REGION` | Регион | `eu-central-1` |
-| `STATE_BUCKET` | Имя S3-бакета | `tfstate-<account>-<region>` |
-| `LOCK_TABLE` | Имя DynamoDB | `terraform-state-lock` |
-| `PROJECT_PREFIX` | Префикс для авто-имени бакета | `tfstate` |
-| `OUTPUT_DIR` | Куда писать `backend.hcl` | `generated` |
-| `AWS_PROFILE` | Профиль AWS CLI | — |
-
-## Dry-run
-
-```bash
-./scripts/create-terraform-state.sh -b example-bucket -n
-# или
-make dry-run
+make collect-dry
 ```

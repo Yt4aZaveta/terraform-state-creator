@@ -1,5 +1,6 @@
 # Local / generated artifacts
 generated/
+imported/
 *.tfstate
 *.tfstate.*
 .terraform/
@@ -12,12 +13,15 @@ override.tf.json
 *_override.tf.json
 .terraformrc
 terraform.rc
+import.tfplan
+*.tfplan
 
 # Secrets / local overrides
 *.tfvars
 !*.tfvars.example
 .env
 .env.*
+!.env.example
 
 # OS / editor
 .DS_Store
