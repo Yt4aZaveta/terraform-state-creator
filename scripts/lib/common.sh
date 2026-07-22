@@ -443,37 +443,52 @@ import re, sys
 src, dest = sys.argv[1], sys.argv[2]
 text = open(src, encoding="utf-8").read()
 
-# Drop attribute lines known to break on K2 / empty-invalid values
+# Drop attribute lines known to break on K2 / empty-invalid / conflicting values
 drop_line = re.compile(
     r'^\s*(?:'
-    r'throughput|enable_lni_at_device_index|map_customer_owned_ip_on_launch|'
+    r'throughput|iops|'
+    r'enable_lni_at_device_index|map_customer_owned_ip_on_launch|'
     r'customer_owned_ipv4_pool|outpost_arn|enable_network_address_usage_metrics|'
     r'disable_api_stop|disable_api_termination|instance_initiated_shutdown_behavior|'
-    r'ipv6_address_count|ipv6_native|enable_resource_name_dns_a_record_on_launch|'
+    r'ipv6_address_count|ipv6_addresses|ipv6_native|ipv6_netmask_length|ipv6_ipam_pool_id|'
+    r'ipv6_cidr_block|assign_ipv6_address_on_creation|'
+    r'enable_resource_name_dns_a_record_on_launch|'
     r'enable_resource_name_dns_aaaa_record_on_launch|private_dns_hostname_type_on_launch|'
     r'acceleration_status|request_payer|object_lock_enabled|'
-    r'bucket_domain_name|bucket_regional_domain_name|region\s*=\s*null'
+    r'bucket_domain_name|bucket_regional_domain_name|hosted_zone_id|'
+    r'carrier_ip|customer_owned_ip|network_border_group|'
+    r'private_dns|public_dns|public_ipv4_pool|'
+    r'region\s*=\s*(?:null|"us-east-1")'
     r')\s*=.*$',
     re.M,
 )
 text = drop_line.sub('', text)
 
-# Remove route blocks with empty cidr_block = ""
+# Also drop null-valued optional junk
+text = re.sub(r'^\s*\w+\s*=\s*null\s*$', '', text, flags=re.M)
+
+# Remove route blocks with empty cidr / ipv6 cidr
 text = re.sub(
-    r'\n\s*route\s*\{[^{}]*?cidr_block\s*=\s*""[^{}]*?\}',
+    r'\n\s*route\s*\{(?:[^{}]|\n)*?cidr_block\s*=\s*""(?:[^{}]|\n)*?\}',
     '',
     text,
-    flags=re.S,
+)
+text = re.sub(
+    r'\n\s*route\s*\{(?:[^{}]|\n)*?ipv6_cidr_block\s*=\s*""(?:[^{}]|\n)*?\}',
+    '',
+    text,
 )
 
 # Remove empty replication_configuration / server_side_encryption_configuration shells
-text = re.sub(r'\n\s*replication_configuration\s*\{\s*role\s*=\s*null\s*\}', '', text)
+text = re.sub(r'\n\s*replication_configuration\s*\{\s*(?:role\s*=\s*null\s*)?\}', '', text)
 text = re.sub(r'\n\s*server_side_encryption_configuration\s*\{\s*\}', '', text)
 
-# Fix SG default description that forces replacement
-text = text.replace(
-    'description            = "Managed by Terraform"',
-    'description            = "default"',
+# Drop Terraform's synthetic SG description that causes noisy drift
+text = re.sub(
+    r'^\s*description\s*=\s*"Managed by Terraform"\s*$',
+    '',
+    text,
+    flags=re.M,
 )
 
 # Collapse excessive blank lines
@@ -482,8 +497,7 @@ open(dest, 'w', encoding='utf-8').write(text)
 print(dest)
 PY
   else
-    # sed fallback
-    grep -Ev '^\s*(throughput|enable_lni_at_device_index|map_customer_owned_ip_on_launch|customer_owned_ipv4_pool|outpost_arn)\s*=' \
+    grep -Ev '^\s*(throughput|enable_lni_at_device_index|map_customer_owned_ip_on_launch|customer_owned_ipv4_pool|outpost_arn|ipv6_address_count|ipv6_addresses|ipv6_netmask_length|ipv6_ipam_pool_id)\s*=' \
       "${src}" > "${dest}.tmp" || true
     mv "${dest}.tmp" "${dest}"
   fi

@@ -341,7 +341,11 @@ import_resources_individually() {
       log "  imported ${addr}"
       ok=$((ok + 1))
     else
-      warn "  failed ${addr} (id=${id}): $(tail -3 /tmp/tf-import-one.log | tr '\n' ' ')"
+      # Show the actual Error lines, not truncated junk
+      local err
+      err="$(grep -E 'Error:|error:' /tmp/tf-import-one.log | head -3 | tr '\n' ' ')"
+      [[ -z "${err}" ]] && err="$(tail -5 /tmp/tf-import-one.log | tr '\n' ' ')"
+      warn "  failed ${addr} (id=${id}): ${err}"
       fail=$((fail + 1))
     fi
   done < <(jq -r '.resources[] | [.type, .name, .id] | @tsv' inventory.json)
@@ -411,9 +415,12 @@ run_terraform_import() {
   if [[ -f generated_resources.tf ]]; then
     log "Wrote generated_resources.tf (plan exit ${plan_rc})"
     assemble_main_tf "${dir}"
+    # CRITICAL: keep only main.tf — otherwise Terraform sees duplicate resources
+    mkdir -p .import-archive
+    mv -f generated_resources.tf .import-archive/generated_resources.tf
+    log "Archived generated_resources.tf (avoid duplicate with main.tf)"
   else
     warn "generate-config-out produced no file — will import with stub resources"
-    # Minimal stubs so terraform import has addresses
     {
       echo "# stubs — refine after import via state-to-main-tf.sh --dump"
       jq -r '.resources[] | "resource \(.type|@json) \(.name|@json) {\n  # imported id = \(.id|@json)\n}\n"' inventory.json
@@ -425,19 +432,32 @@ run_terraform_import() {
   rm -f import.tfplan
 
   # Move import blocks aside so they don't conflict with classic import
+  mkdir -p .import-archive
   if [[ -f imports.tf ]]; then
-    mkdir -p .import-archive
     mv -f imports.tf .import-archive/imports.tf
+  fi
+
+  # Validate config loads before importing
+  set +e
+  terraform validate >/tmp/tf-validate.log 2>&1
+  local val_rc=$?
+  set -e
+  if [[ "${val_rc}" -ne 0 ]]; then
+    warn "terraform validate failed after sanitize — see /tmp/tf-validate.log"
+    warn "Attempting imports anyway; fix main.tf manually if imports fail"
+    # show first errors
+    grep -E 'Error:|error' /tmp/tf-validate.log | head -20 >&2 || true
+  else
+    log "terraform validate OK"
   fi
 
   import_resources_individually
 
   # Prefer offline dump from state to refresh main.tf (fills real attributes)
-  if [[ -f terraform.tfstate ]] && have jq; then
+  if [[ -f terraform.tfstate ]] && jq -e '.resources | length > 0' terraform.tfstate >/dev/null 2>&1; then
     log "Rebuilding main.tf from state (offline dump)..."
     if "${SCRIPT_DIR}/state-to-main-tf.sh" --dump -w "${dir}" -o "${dir}/main.tf.from_state" 2>/tmp/state-dump.log; then
       if [[ -s "${dir}/main.tf.from_state" ]]; then
-        # Keep provider.tf separate; replace main.tf with dump
         if is_k2_cloud; then
           sanitize_generated_hcl "${dir}/main.tf.from_state" "${dir}/main.tf"
         else
@@ -452,7 +472,10 @@ run_terraform_import() {
   fi
 
   log "State summary:"
-  terraform state list || true
+  terraform state list 2>/tmp/tf-state-list.err || {
+    warn "terraform state list failed (config error?):"
+    head -40 /tmp/tf-state-list.err >&2 || true
+  }
 
   popd >/dev/null
 }
