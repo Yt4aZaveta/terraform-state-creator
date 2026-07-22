@@ -95,13 +95,47 @@ source_cloud_rc() {
   log "Loaded credentials from ${rc_file}"
   log "Project: ${C2_PROJECT:-unknown}  region: ${AWS_REGION}"
   [[ -n "${EC2_URL:-}" ]] && log "EC2 endpoint: ${EC2_URL}"
+
+  if is_k2_cloud; then
+    configure_network_for_cloud
+  fi
+}
+
+# After loading c2rc: K2 API is usually reachable directly.
+# AWS CLI breaks on HTTPS_PROXY=socks5://... (turns into http://socks5://...).
+configure_network_for_cloud() {
+  local extras=".k2.cloud,k2.cloud"
+  extras+=",ec2.ru-msk.k2.cloud,s3.ru-msk.k2.cloud,elb.ru-msk.k2.cloud"
+  extras+=",iam.k2.cloud,route53.k2.cloud,eks.ru-msk.k2.cloud"
+  extras+=",localhost,127.0.0.1"
+
+  if [[ -n "${NO_PROXY:-}" ]]; then
+    export NO_PROXY="${NO_PROXY},${extras}"
+  else
+    export NO_PROXY="${extras}"
+  fi
+  export no_proxy="${NO_PROXY}"
+
+  if [[ "${HTTP_PROXY:-}${HTTPS_PROXY:-}${http_proxy:-}${https_proxy:-}" == *socks* ]]; then
+    # Preserve socks for tools that understand ALL_PROXY (curl); strip from HTTP(S)_PROXY
+    if [[ -z "${ALL_PROXY:-}${all_proxy:-}" ]]; then
+      export ALL_PROXY="${HTTPS_PROXY:-${https_proxy:-${HTTP_PROXY:-${http_proxy:-}}}}"
+      export all_proxy="${ALL_PROXY}"
+    fi
+    warn "SOCKS proxy detected — AWS CLI will talk to K2 Cloud directly (NO_PROXY=.k2.cloud)"
+    warn "Proxy still used for provider download via curl/ALL_PROXY"
+  fi
+}
+
+# Run a command without HTTP(S) proxy env (K2 / broken socks+aws-cli).
+without_http_proxy() {
+  env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy \
+      -u ALL_PROXY -u all_proxy \
+      "$@"
 }
 
 # aws wrapper with optional --endpoint-url for a service.
 # Usage: aws_svc ec2 ec2 describe-vpcs ...
-#        aws_svc s3  s3api list-buckets ...
-#        aws_svc elb elbv2 describe-load-balancers ...
-#        aws_svc iam iam list-roles ...
 aws_svc() {
   local kind="$1"; shift
   local endpoint=""
@@ -118,7 +152,13 @@ aws_svc() {
   if [[ -n "${endpoint}" ]]; then
     args+=(--endpoint-url "${endpoint}")
   fi
-  aws "${args[@]}" "$@"
+
+  if is_k2_cloud; then
+    # Direct to K2 — avoid AWS CLI + socks5 HTTPS_PROXY bug
+    without_http_proxy aws "${args[@]}" "$@"
+  else
+    aws "${args[@]}" "$@"
+  fi
 }
 
 # Validate that credentials work (STS on AWS; EC2 Describe on K2).
@@ -254,10 +294,21 @@ ensure_aws_provider_mirror() {
     local tmp
     tmp="$(mktemp -d)"
     if ! curl -fsSL "${url}" -o "${tmp}/provider.zip"; then
-      rm -rf "${tmp}"
-      die "Cannot download AWS provider from releases.hashicorp.com.
+      # Retry with explicit ALL_PROXY if user had socks only in HTTPS_PROXY
+      if [[ -n "${ALL_PROXY:-}${all_proxy:-}${HTTPS_PROXY:-}" ]]; then
+        warn "Direct download failed — retrying via proxy..."
+        if ! curl -fsSL --proxy "${ALL_PROXY:-${all_proxy:-${HTTPS_PROXY:-${https_proxy:-}}}}" \
+            "${url}" -o "${tmp}/provider.zip"; then
+          rm -rf "${tmp}"
+          die "Cannot download AWS provider from releases.hashicorp.com.
   • With proxy:  proxy ./scripts/collect-aws-state.sh --rc ./c2rc.sh --auto-approve
   • Or:          HTTPS_PROXY=socks5://127.0.0.1:7897 ./scripts/collect-aws-state.sh ..."
+        fi
+      else
+        rm -rf "${tmp}"
+        die "Cannot download AWS provider from releases.hashicorp.com.
+  • With proxy:  proxy ./scripts/collect-aws-state.sh --rc ./c2rc.sh --auto-approve"
+      fi
     fi
     have unzip || die "unzip is required"
     mkdir -p "${dest_dir}"
