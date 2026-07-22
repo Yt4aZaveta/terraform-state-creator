@@ -1,0 +1,3 @@
+# After running ./scripts/collect-aws-state.sh this directory will contain:
+#   main.tf, provider.tf, terraform.tfstate, inventory.json
+# Commit those files to git when ready.

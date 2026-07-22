@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # One-command flow:
-#   credentials → validate → create remote backend → scan AWS →
-#   generate Terraform import blocks → generate config → import into state →
-#   push state to S3.
+#   credentials → validate → scan AWS → generate Terraform import blocks →
+#   generate config → import into LOCAL state → assemble main.tf
 #
 # Usage:
 #   export AWS_ACCESS_KEY_ID=...
 #   export AWS_SECRET_ACCESS_KEY=...
 #   export AWS_REGION=eu-central-1
-#   ./scripts/collect-aws-state.sh
+#   ./scripts/collect-aws-state.sh --auto-approve
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,39 +16,32 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 
 AWS_REGION="${AWS_REGION:-eu-central-1}"
-STATE_BUCKET="${STATE_BUCKET:-}"
-LOCK_TABLE="${LOCK_TABLE:-terraform-state-lock}"
-PROJECT_PREFIX="${PROJECT_PREFIX:-tfstate}"
 SERVICES="${SERVICES:-vpc,subnet,route_table,igw,nat,eip,sg,ec2,ebs,s3,rds,dynamodb,lambda,elb}"
 WORK_DIR="${WORK_DIR:-${ROOT_DIR}/imported}"
-BACKEND_DIR="${BACKEND_DIR:-${ROOT_DIR}/generated}"
-STATE_KEY="${STATE_KEY:-imported/terraform.tfstate}"
 DRY_RUN=false
-SKIP_BACKEND=false
 SKIP_IMPORT=false
 AUTO_APPROVE=false
 INSTALL_DEPS=true
+KEEP_IMPORTS=false
 
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [options]
 
-Scan existing AWS resources and build Terraform state you can manage.
+Scan existing AWS resources and build a local Terraform project:
+  inventory.json + terraform.tfstate + main.tf
 
 Ideal flow:
   1. Put AWS credentials in the environment (or ~/.aws/credentials)
   2. Run this script
-  3. Get: Terraform configs + remote state in S3
+  3. Commit imported/main.tf and imported/terraform.tfstate to git
 
 Options:
   -r, --region REGION       AWS region (default: ${AWS_REGION})
-  -b, --bucket NAME         S3 bucket for remote state (auto if omitted)
-  -t, --table NAME          DynamoDB lock table (default: ${LOCK_TABLE})
   -s, --services LIST       Services to scan (default: common set; or "all")
   -w, --work-dir DIR        Where to write Terraform project (default: ./imported)
-  --state-key KEY           S3 object key for state (default: ${STATE_KEY})
-  --skip-backend            Do not create/use remote S3 backend (local state only)
   --skip-import             Only discover + write import blocks (no terraform)
+  --keep-imports            Keep imports.tf after successful import
   --auto-approve            Pass -auto-approve to terraform apply
   --no-install-deps         Do not attempt to install missing aws/terraform
   -n, --dry-run             Fake discovery; do not call AWS / terraform apply
@@ -60,25 +52,23 @@ Credentials (any standard AWS method):
   export AWS_SECRET_ACCESS_KEY=...
   export AWS_SESSION_TOKEN=...          # if using temporary creds
   export AWS_REGION=${AWS_REGION}
-  # or: aws configure
-  # or: AWS_PROFILE=myprofile
+  # or: aws configure / AWS_PROFILE=...
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -r|--region)         AWS_REGION="$2"; shift 2 ;;
-    -b|--bucket)         STATE_BUCKET="$2"; shift 2 ;;
-    -t|--table)          LOCK_TABLE="$2"; shift 2 ;;
     -s|--services)       SERVICES="$2"; shift 2 ;;
     -w|--work-dir)       WORK_DIR="$2"; shift 2 ;;
-    --state-key)         STATE_KEY="$2"; shift 2 ;;
-    --skip-backend)      SKIP_BACKEND=true; shift ;;
     --skip-import)       SKIP_IMPORT=true; shift ;;
+    --keep-imports)      KEEP_IMPORTS=true; shift ;;
     --auto-approve)      AUTO_APPROVE=true; shift ;;
     --no-install-deps)   INSTALL_DEPS=false; shift ;;
     -n|--dry-run)        DRY_RUN=true; shift ;;
     -h|--help)           usage; exit 0 ;;
+    # Deprecated flags kept for compatibility (ignored)
+    -b|--bucket|-t|--table|--state-key|--skip-backend) shift 2 2>/dev/null || shift ;;
     *) die "Unknown option: $1" ;;
   esac
 done
@@ -144,7 +134,6 @@ ensure_deps() {
         die "terraform is required"
       fi
     fi
-    # generate-config-out needs Terraform >= 1.5
     local tfver
     tfver="$(terraform version -json | jq -r '.terraform_version')"
     log "Terraform ${tfver}"
@@ -160,7 +149,8 @@ write_terraform_project() {
 
   mkdir -p "${dir}"
   rm -f "${dir}/imports.tf" "${dir}/provider.tf" "${dir}/backend.tf" \
-        "${dir}/generated_resources.tf" "${dir}/.terraform.lock.hcl"
+        "${dir}/backend.hcl" "${dir}/generated_resources.tf" \
+        "${dir}/main.tf" "${dir}/.terraform.lock.hcl" "${dir}/import.tfplan"
   rm -rf "${dir}/.terraform"
 
   cat > "${dir}/provider.tf" <<EOF
@@ -181,7 +171,7 @@ provider "aws" {
 EOF
 
   {
-    echo "# AUTO-GENERATED import blocks — do not edit by hand"
+    echo "# AUTO-GENERATED import blocks — removed after successful import"
     echo "# Source inventory: inventory.json"
     echo
     jq -r '.resources[] | [
@@ -204,47 +194,39 @@ EOF
   log "Wrote ${dir}/provider.tf"
 }
 
-configure_remote_backend() {
+assemble_main_tf() {
   local dir="$1"
-  local backend_hcl="$2"
+  local src="${dir}/generated_resources.tf"
+  local out="${dir}/main.tf"
 
-  # Rewrite state key for imported infrastructure
-  local bucket region table
-  bucket="$(grep -E '^\s*bucket\s*=' "${backend_hcl}" | head -1 | sed -E 's/.*=\s*"([^"]+)".*/\1/')"
-  region="$(grep -E '^\s*region\s*=' "${backend_hcl}" | head -1 | sed -E 's/.*=\s*"([^"]+)".*/\1/')"
-  table="$(grep -E '^\s*dynamodb_table\s*=' "${backend_hcl}" | head -1 | sed -E 's/.*=\s*"([^"]+)".*/\1/')"
+  if [[ ! -f "${src}" ]]; then
+    warn "No generated_resources.tf — cannot assemble main.tf yet"
+    return 1
+  fi
 
-  cat > "${dir}/backend.hcl" <<EOF
-bucket         = "${bucket}"
-key            = "${STATE_KEY}"
-region         = "${region}"
-dynamodb_table = "${table}"
-encrypt        = true
+  {
+    cat <<'EOF'
+# =============================================================================
+# main.tf — assembled from live AWS resources (terraform -generate-config-out)
+# Review and tidy before relying on plan/apply. Nested blocks may need edits.
+# Regenerated by: scripts/collect-aws-state.sh  or  scripts/state-to-main-tf.sh
+# =============================================================================
+
 EOF
+    # Drop leading terraform/provider blocks if generate-config-out ever emits them
+    sed -E '/^[[:space:]]*terraform[[:space:]]*\{/,/^[[:space:]]*\}/d; /^[[:space:]]*provider[[:space:]]+"/,/^[[:space:]]*\}/d' "${src}"
+  } > "${out}"
 
-  # Empty backend block — values from backend.hcl
-  cat > "${dir}/backend.tf" <<'EOF'
-terraform {
-  backend "s3" {}
-}
-EOF
-
-  log "Remote backend → s3://${bucket}/${STATE_KEY}"
+  log "Wrote ${out}"
 }
 
 run_terraform_import() {
   local dir="$1"
-  local use_backend="$2"
 
   pushd "${dir}" >/dev/null
 
-  if [[ "${use_backend}" == true ]]; then
-    log "terraform init (S3 backend)..."
-    terraform init -input=false -backend-config=backend.hcl
-  else
-    log "terraform init (local state)..."
-    terraform init -input=false -backend=false
-  fi
+  log "terraform init (local state)..."
+  terraform init -input=false -backend=false
 
   local count
   count="$(jq '.resource_count' inventory.json)"
@@ -255,7 +237,6 @@ run_terraform_import() {
   fi
 
   log "Generating Terraform config from live AWS resources..."
-  # -generate-config-out writes HCL for resources referenced by import blocks
   set +e
   terraform plan -generate-config-out=generated_resources.tf -input=false -out=import.tfplan
   local plan_rc=$?
@@ -269,8 +250,9 @@ run_terraform_import() {
   fi
 
   log "Wrote generated_resources.tf"
-  log "Applying imports into Terraform state..."
+  assemble_main_tf "${dir}"
 
+  log "Applying imports into local Terraform state..."
   local apply_flags=(-input=false)
   if [[ "${AUTO_APPROVE}" == true ]]; then
     apply_flags+=(-auto-approve)
@@ -279,9 +261,16 @@ run_terraform_import() {
   if [[ -f import.tfplan ]]; then
     terraform apply "${apply_flags[@]}" import.tfplan
   else
-    # Re-plan after generated config exists, then apply
     terraform plan -input=false -out=import.tfplan
     terraform apply "${apply_flags[@]}" import.tfplan
+  fi
+
+  # Import blocks are one-shot — archive unless asked to keep
+  if [[ "${KEEP_IMPORTS}" != true ]]; then
+    mkdir -p .import-archive
+    mv -f imports.tf .import-archive/imports.tf
+    rm -f import.tfplan
+    log "Archived imports.tf → .import-archive/ (one-time import complete)"
   fi
 
   log "State summary:"
@@ -294,6 +283,7 @@ run_terraform_import() {
 # Main
 # ---------------------------------------------------------------------------
 log "AWS region: ${AWS_REGION}"
+log "State storage: local (${WORK_DIR}/terraform.tfstate)"
 ensure_deps
 
 if [[ "${DRY_RUN}" != true ]]; then
@@ -302,77 +292,62 @@ if [[ "${DRY_RUN}" != true ]]; then
     || die "Cannot authenticate. Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (or AWS_PROFILE)."
 fi
 
-mkdir -p "${WORK_DIR}" "${BACKEND_DIR}"
+mkdir -p "${WORK_DIR}"
 
-# 1) Remote backend (S3 + DynamoDB)
-if [[ "${SKIP_BACKEND}" != true ]]; then
-  log "Step 1/4 — ensure Terraform remote state backend..."
-  CREATE_ARGS=(-r "${AWS_REGION}" -t "${LOCK_TABLE}" -p "${PROJECT_PREFIX}" -o "${BACKEND_DIR}")
-  if [[ -n "${STATE_BUCKET}" ]]; then
-    CREATE_ARGS+=(-b "${STATE_BUCKET}")
-  fi
-  if [[ "${DRY_RUN}" == true ]]; then
-    CREATE_ARGS+=(-n -b "${STATE_BUCKET:-dryrun-tfstate-bucket}")
-  fi
-  "${SCRIPT_DIR}/create-terraform-state.sh" "${CREATE_ARGS[@]}"
-
-  # Resolve bucket name from generated backend.json
-  if [[ -f "${BACKEND_DIR}/backend.json" ]]; then
-    STATE_BUCKET="$(jq -r '.bucket' "${BACKEND_DIR}/backend.json")"
-    LOCK_TABLE="$(jq -r '.dynamodb_table' "${BACKEND_DIR}/backend.json")"
-  fi
-else
-  log "Step 1/4 — skipped (local state only)"
-fi
-
-# 2) Discover
-log "Step 2/4 — scan AWS resources (${SERVICES})..."
+# 1) Discover
+log "Step 1/3 — scan AWS resources (${SERVICES})..."
 INVENTORY="${WORK_DIR}/inventory.json"
 DISCOVER_ARGS=(-r "${AWS_REGION}" -s "${SERVICES}" -o "${INVENTORY}")
-[[ -n "${STATE_BUCKET}" ]] && DISCOVER_ARGS+=(--skip-bucket "${STATE_BUCKET}")
-[[ -n "${LOCK_TABLE}" ]] && DISCOVER_ARGS+=(--skip-table "${LOCK_TABLE}")
 [[ "${DRY_RUN}" == true ]] && DISCOVER_ARGS+=(-n)
 "${SCRIPT_DIR}/discover-aws-resources.sh" "${DISCOVER_ARGS[@]}"
 
 COUNT="$(jq '.resource_count' "${INVENTORY}")"
 log "Found ${COUNT} resources"
 
-# 3) Generate Terraform project
-log "Step 3/4 — write Terraform project into ${WORK_DIR}..."
+# 2) Generate Terraform project
+log "Step 2/3 — write Terraform project into ${WORK_DIR}..."
 write_terraform_project "${INVENTORY}" "${WORK_DIR}"
 
-USE_BACKEND=false
-if [[ "${SKIP_BACKEND}" != true && -f "${BACKEND_DIR}/backend.hcl" ]]; then
-  configure_remote_backend "${WORK_DIR}" "${BACKEND_DIR}/backend.hcl"
-  USE_BACKEND=true
-fi
-
-# 4) Import
+# 3) Import → local state + main.tf
 if [[ "${SKIP_IMPORT}" == true || "${DRY_RUN}" == true ]]; then
-  log "Step 4/4 — skipped terraform import (dry-run or --skip-import)"
+  log "Step 3/3 — skipped terraform import (dry-run or --skip-import)"
+  if [[ "${DRY_RUN}" == true ]]; then
+    # Placeholder main.tf so the layout is clear without AWS
+    cat > "${WORK_DIR}/main.tf" <<'EOF'
+# =============================================================================
+# main.tf — placeholder (dry-run)
+# After a real run this file contains resource blocks generated from AWS.
+# =============================================================================
+
+# resource "aws_vpc" "example" { ... }
+EOF
+    log "Wrote ${WORK_DIR}/main.tf (dry-run placeholder)"
+  fi
 else
-  log "Step 4/4 — import resources into Terraform state..."
-  run_terraform_import "${WORK_DIR}" "${USE_BACKEND}"
+  log "Step 3/3 — import resources into local state and build main.tf..."
+  run_terraform_import "${WORK_DIR}"
 fi
 
 cat <<EOF
 
 Done.
 
-What you have now:
-  • Inventory:     ${WORK_DIR}/inventory.json
-  • Import blocks: ${WORK_DIR}/imports.tf
-  • Provider:      ${WORK_DIR}/provider.tf
-$([ -f "${WORK_DIR}/generated_resources.tf" ] && echo "  • Generated TF:  ${WORK_DIR}/generated_resources.tf")
-$([ "${USE_BACKEND}" == true ] && echo "  • Remote state:  s3://${STATE_BUCKET}/${STATE_KEY}" || echo "  • Local state:   ${WORK_DIR}/terraform.tfstate")
+What you have now (ready for git):
+  • Inventory:   ${WORK_DIR}/inventory.json
+  • Provider:    ${WORK_DIR}/provider.tf
+  • Code:        ${WORK_DIR}/main.tf
+  • Local state: ${WORK_DIR}/terraform.tfstate
 
 Next:
   cd ${WORK_DIR}
-  terraform plan          # should be empty / only drift if import succeeded
-  terraform state list    # resources under management
+  terraform state list
+  terraform plan
+  # edit main.tf as needed, then commit main.tf + terraform.tfstate
+
+Rebuild main.tf from state later:
+  ./scripts/state-to-main-tf.sh -w ${WORK_DIR}
 
 Tips:
   • Narrow the scan:  ./scripts/collect-aws-state.sh -s vpc,subnet,ec2
   • Full-ish scan:    ./scripts/collect-aws-state.sh -s all
-  • Re-run is safe:   existing backend is reused; re-import may need state rm first
 EOF
