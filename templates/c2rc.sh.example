@@ -1,0 +1,32 @@
+# Settings to access K2 Cloud using public API
+# Copy to c2rc.sh, fill in secrets, never commit c2rc.sh
+#
+# Usage:
+#   ./scripts/collect-aws-state.sh --rc ./c2rc.sh --auto-approve
+
+export C2_PROJECT="your-project"
+export BASE_ACCESS_KEY="user@example.com"
+export EC2_ACCESS_KEY="${C2_PROJECT}:${BASE_ACCESS_KEY}"
+export EC2_SECRET_KEY="YOUR_SECRET_KEY"
+
+export AWS_ACCESS_KEY_ID="$EC2_ACCESS_KEY"
+export AWS_SECRET_ACCESS_KEY="$EC2_SECRET_KEY"
+
+export S3_URL="https://s3.ru-msk.k2.cloud"
+export EC2_URL="https://ec2.ru-msk.k2.cloud"
+export LEGACY_EKS_URL="https://eks.ru-msk.k2.cloud/legacy"
+export EKS_URL="https://eks.ru-msk.k2.cloud"
+export ELB_URL="https://elb.ru-msk.k2.cloud"
+export ROUTE53_URL="https://route53.k2.cloud"
+export PAAS_URL="https://paas.ru-msk.k2.cloud"
+export AWS_CLOUDWATCH_URL="https://cloudwatch.ru-msk.k2.cloud"
+export AWS_CLOUDTRAIL_URL="https://cloudtrail.ru-msk.k2.cloud"
+export AUTO_SCALING_URL="https://autoscaling.ru-msk.k2.cloud"
+export BACKUP_URL="https://backup.ru-msk.k2.cloud"
+export DIRECT_CONNECT_URL="https://directconnect.ru-msk.k2.cloud"
+export EFS_URL="https://efs.ru-msk.k2.cloud"
+export IAM_URL="https://iam.k2.cloud"
+export SQS_URL="https://sqs.ru-msk.k2.cloud"
+export KMS_URL="https://kms.ru-msk.k2.cloud"
+export RGT_URL="https://tagging.ru-msk.k2.cloud"
+export CLOUDWATCH_LOGS_URL="https://logs.ru-msk.k2.cloud"

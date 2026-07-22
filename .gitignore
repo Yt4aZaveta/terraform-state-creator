@@ -1,0 +1,36 @@
+# Terraform plugin cache / local init
+**/.terraform/
+**/.terraform.lock.hcl
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+*.tfplan
+import.tfplan
+
+# One-shot import leftovers
+**/.import-archive/
+
+# Secrets / local overrides
+*.tfvars
+!*.tfvars.example
+.env
+.env.*
+!.env.example
+c2rc.sh
+*c2rc*.sh
+!templates/c2rc.sh.example
+!**/c2rc.sh.example
+
+# Optional remote-backend leftovers (not used by default)
+generated/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/

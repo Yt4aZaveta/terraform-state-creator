@@ -1,0 +1,9 @@
+# Generated / example backend partial config.
+# Fill in after running scripts/create-terraform-state.sh
+# or copy from generated/backend.hcl
+
+bucket         = "YOUR_STATE_BUCKET"
+key            = "infrastructure/terraform.tfstate"
+region         = "eu-central-1"
+dynamodb_table = "terraform-state-lock"
+encrypt        = true
