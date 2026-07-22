@@ -313,7 +313,55 @@ EOF
   log "Wrote ${out}"
 }
 
-# Import each inventory resource with classic `terraform import` (resilient on K2).
+# Write minimal resource stubs so `terraform import` has addresses to target.
+# Real attributes are filled later from state dump.
+write_import_stubs() {
+  local inventory="$1"
+  local out="$2"
+  {
+    cat <<'EOF'
+# =============================================================================
+# main.tf — temporary stubs for terraform import
+# Replaced after import with attributes from terraform.tfstate
+# =============================================================================
+
+EOF
+    jq -r '
+      .resources[] |
+      "# id = \(.id|@json)\n" +
+      "resource \(.type|@json) \(.name|@json) {\n" +
+      (
+        if .type == "aws_vpc" then
+          "  cidr_block = \"10.0.0.0/16\"\n"
+        elif .type == "aws_subnet" then
+          "  vpc_id     = \"vpc-00000000\"\n  cidr_block = \"10.0.1.0/24\"\n"
+        elif .type == "aws_route_table" then
+          "  vpc_id = \"vpc-00000000\"\n"
+        elif .type == "aws_internet_gateway" then
+          ""
+        elif .type == "aws_eip" then
+          "  vpc = true\n"
+        elif .type == "aws_security_group" then
+          "  name   = \"imported\"\n  vpc_id = \"vpc-00000000\"\n"
+        elif .type == "aws_instance" then
+          "  ami           = \"ami-00000000\"\n  instance_type = \"t2.micro\"\n"
+        elif .type == "aws_ebs_volume" then
+          "  availability_zone = \"ru-msk-a\"\n  size              = 1\n"
+        elif .type == "aws_s3_bucket" then
+          "  bucket = \(.id|@json)\n"
+        elif .type == "aws_lb" then
+          "  load_balancer_type = \"application\"\n"
+        else
+          ""
+        end
+      ) +
+      "}\n"
+    ' "${inventory}"
+  } > "${out}"
+  log "Wrote stub ${out}"
+}
+
+# Import each inventory resource with classic `terraform import`.
 import_resources_individually() {
   local ok=0
   local fail=0
@@ -322,14 +370,12 @@ import_resources_individually() {
   while IFS=$'\t' read -r type name id; do
     [[ -z "${type}" ]] && continue
     local addr="${type}.${name}"
-    # Skip if already in state
     if terraform state list 2>/dev/null | grep -qxF "${addr}"; then
       log "  skip (already in state): ${addr}"
       ok=$((ok + 1))
       continue
     fi
     set +e
-    # K2: no proxy for provider API calls during import
     if is_k2_cloud; then
       without_http_proxy terraform import -input=false "${addr}" "${id}" >/tmp/tf-import-one.log 2>&1
     else
@@ -341,9 +387,8 @@ import_resources_individually() {
       log "  imported ${addr}"
       ok=$((ok + 1))
     else
-      # Show the actual Error lines, not truncated junk
       local err
-      err="$(grep -E 'Error:|error:' /tmp/tf-import-one.log | head -3 | tr '\n' ' ')"
+      err="$(grep -E 'Error:' /tmp/tf-import-one.log | head -2 | tr '\n' ' ')"
       [[ -z "${err}" ]] && err="$(tail -5 /tmp/tf-import-one.log | tr '\n' ' ')"
       warn "  failed ${addr} (id=${id}): ${err}"
       fail=$((fail + 1))
@@ -354,16 +399,56 @@ import_resources_individually() {
   return 0
 }
 
+rebuild_main_from_state() {
+  local dir="$1"
+  if [[ ! -f "${dir}/terraform.tfstate" ]]; then
+    warn "No terraform.tfstate — keeping current main.tf"
+    return 1
+  fi
+  if ! jq -e '.resources | length > 0' "${dir}/terraform.tfstate" >/dev/null 2>&1; then
+    warn "State has no resources yet"
+    return 1
+  fi
+
+  log "Rebuilding main.tf from state..."
+  if ! "${SCRIPT_DIR}/state-to-main-tf.sh" --dump -w "${dir}" -o "${dir}/main.tf.from_state" 2>/tmp/state-dump.log; then
+    warn "state dump failed: $(tr '\n' ' ' </tmp/state-dump.log)"
+    return 1
+  fi
+  if [[ ! -s "${dir}/main.tf.from_state" ]]; then
+    return 1
+  fi
+  if is_k2_cloud; then
+    sanitize_generated_hcl "${dir}/main.tf.from_state" "${dir}/main.tf"
+  else
+    mv -f "${dir}/main.tf.from_state" "${dir}/main.tf"
+  fi
+  rm -f "${dir}/main.tf.from_state"
+  log "Updated main.tf from terraform.tfstate"
+}
+
 run_terraform_import() {
   local dir="$1"
 
   pushd "${dir}" >/dev/null
 
+  # Remove leftovers that confuse Terraform
+  rm -f generated_resources.tf import.tfplan \
+        .generated_stripped.tf .generated_body.tf \
+        main.tf.from_state
+  mkdir -p .import-archive
+  # Archived .tf must not be loaded — rename away from .tf
+  find .import-archive -name '*.tf' -exec mv {} {}.bak \; 2>/dev/null || true
+
   ensure_aws_provider_mirror "${HOME}/.terraform.d/mirror"
 
-  log "terraform init (local state)..."
+  # Fresh lock file matching current provider.tf (avoids hashicorp/rockitcloud drift)
+  rm -f .terraform.lock.hcl
+  rm -rf .terraform
+
+  log "terraform init -upgrade (local state)..."
   set +e
-  terraform init -input=false -backend=false
+  terraform init -input=false -backend=false -upgrade
   local init_rc=$?
   set -e
 
@@ -371,11 +456,11 @@ run_terraform_import() {
     warn "terraform init via K2 registry failed — retrying with GitHub filesystem mirror"
     export ROCKITCLOUD_USE_MIRROR=1
     ensure_aws_provider_mirror "${HOME}/.terraform.d/mirror"
-    # Rewrite provider.tf with exact pinned version for mirror
-    if is_k2_cloud; then export IS_COMPAT_CLOUD=true; fi
     emit_provider_tf > provider.tf
     write_tfvars .
-    terraform init -input=false -backend=false
+    rm -f .terraform.lock.hcl
+    rm -rf .terraform
+    terraform init -input=false -backend=false -upgrade
     init_rc=$?
   fi
 
@@ -386,16 +471,6 @@ run_terraform_import() {
     return 1
   fi
 
-  # If previous runs left hashicorp/aws in state, retarget to rockitcloud
-  if is_k2_cloud && [[ -f terraform.tfstate ]]; then
-    if grep -q 'registry.terraform.io/hashicorp/aws\|hashicorp/aws' terraform.tfstate 2>/dev/null; then
-      log "Replacing provider in state → rockitcloud..."
-      terraform state replace-provider -auto-approve \
-        registry.terraform.io/hashicorp/aws \
-        hc-registry.website.k2.cloud/c2devel/rockitcloud 2>/dev/null || true
-    fi
-  fi
-
   local count
   count="$(jq '.resource_count' inventory.json)"
   if [[ "${count}" -eq 0 ]]; then
@@ -404,78 +479,55 @@ run_terraform_import() {
     return 0
   fi
 
-  log "Generating Terraform config from live cloud resources..."
-  rm -f generated_resources.tf import.tfplan
-  set +e
-  # On K2 this often exits non-zero due to unsupported Describe* calls — file may still be written
-  terraform plan -generate-config-out=generated_resources.tf -input=false -out=import.tfplan
-  local plan_rc=$?
-  set -e
-
-  if [[ -f generated_resources.tf ]]; then
-    log "Wrote generated_resources.tf (plan exit ${plan_rc})"
-    assemble_main_tf "${dir}"
-    # CRITICAL: keep only main.tf — otherwise Terraform sees duplicate resources
-    mkdir -p .import-archive
-    mv -f generated_resources.tf .import-archive/generated_resources.tf
-    log "Archived generated_resources.tf (avoid duplicate with main.tf)"
+  # K2: skip experimental generate-config-out (emits invalid HCL for this API).
+  if is_k2_cloud; then
+    log "K2 mode: writing import stubs (skip generate-config-out)..."
+    if [[ -f imports.tf ]]; then
+      mv -f imports.tf .import-archive/imports.tf.bak
+    fi
+    write_import_stubs inventory.json main.tf
   else
-    warn "generate-config-out produced no file — will import with stub resources"
-    {
-      echo "# stubs — refine after import via state-to-main-tf.sh --dump"
-      jq -r '.resources[] | "resource \(.type|@json) \(.name|@json) {\n  # imported id = \(.id|@json)\n}\n"' inventory.json
-    } > main.tf
+    log "Generating Terraform config from live cloud resources..."
+    rm -f generated_resources.tf
+    set +e
+    terraform plan -generate-config-out=generated_resources.tf -input=false >/tmp/tf-gen-plan.log 2>&1
+    local plan_rc=$?
+    set -e
+    if [[ -f generated_resources.tf ]]; then
+      log "Wrote generated_resources.tf (plan exit ${plan_rc})"
+      assemble_main_tf "${dir}"
+      mv -f generated_resources.tf .import-archive/generated_resources.tf.bak
+      [[ -f imports.tf ]] && mv -f imports.tf .import-archive/imports.tf.bak
+    else
+      warn "generate-config-out failed — using stubs"
+      [[ -f imports.tf ]] && mv -f imports.tf .import-archive/imports.tf.bak
+      write_import_stubs inventory.json main.tf
+    fi
   fi
 
-  # Do NOT apply incomplete plans (K2 often breaks plan generation).
-  # Classic per-resource import is reliable once resource blocks exist in main.tf.
-  rm -f import.tfplan
+  # Ensure only provider.tf + main.tf (+ tfvars) are loaded
+  rm -f generated_resources.tf imports.tf .generated_*.tf
 
-  # Move import blocks aside so they don't conflict with classic import
-  mkdir -p .import-archive
-  if [[ -f imports.tf ]]; then
-    mv -f imports.tf .import-archive/imports.tf
-  fi
-
-  # Validate config loads before importing
   set +e
   terraform validate >/tmp/tf-validate.log 2>&1
   local val_rc=$?
   set -e
   if [[ "${val_rc}" -ne 0 ]]; then
-    warn "terraform validate failed after sanitize — see /tmp/tf-validate.log"
-    warn "Attempting imports anyway; fix main.tf manually if imports fail"
-    # show first errors
-    grep -E 'Error:|error' /tmp/tf-validate.log | head -20 >&2 || true
+    warn "terraform validate failed — see /tmp/tf-validate.log"
+    grep -E 'Error:' /tmp/tf-validate.log | head -20 >&2 || true
+    terraform init -input=false -backend=false -upgrade >/tmp/tf-reinit.log 2>&1 || true
   else
     log "terraform validate OK"
   fi
 
   import_resources_individually
-
-  # Prefer offline dump from state to refresh main.tf (fills real attributes)
-  if [[ -f terraform.tfstate ]] && jq -e '.resources | length > 0' terraform.tfstate >/dev/null 2>&1; then
-    log "Rebuilding main.tf from state (offline dump)..."
-    if "${SCRIPT_DIR}/state-to-main-tf.sh" --dump -w "${dir}" -o "${dir}/main.tf.from_state" 2>/tmp/state-dump.log; then
-      if [[ -s "${dir}/main.tf.from_state" ]]; then
-        if is_k2_cloud; then
-          sanitize_generated_hcl "${dir}/main.tf.from_state" "${dir}/main.tf"
-        else
-          mv -f "${dir}/main.tf.from_state" "${dir}/main.tf"
-        fi
-        rm -f "${dir}/main.tf.from_state"
-        log "Updated main.tf from terraform.tfstate"
-      fi
-    else
-      warn "state dump skipped: $(tr '\n' ' ' </tmp/state-dump.log)"
-    fi
-  fi
+  rebuild_main_from_state "${dir}" || true
 
   log "State summary:"
-  terraform state list 2>/tmp/tf-state-list.err || {
-    warn "terraform state list failed (config error?):"
+  if ! terraform state list 2>/tmp/tf-state-list.err; then
+    warn "terraform state list failed:"
     head -40 /tmp/tf-state-list.err >&2 || true
-  }
+  fi
 
   popd >/dev/null
 }

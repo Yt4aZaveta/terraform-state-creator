@@ -494,7 +494,6 @@ text = re.sub(
 # Collapse excessive blank lines
 text = re.sub(r'\n{3,}', '\n\n', text)
 open(dest, 'w', encoding='utf-8').write(text)
-print(dest)
 PY
   else
     grep -Ev '^\s*(throughput|enable_lni_at_device_index|map_customer_owned_ip_on_launch|customer_owned_ipv4_pool|outpost_arn|ipv6_address_count|ipv6_addresses|ipv6_netmask_length|ipv6_ipam_pool_id)\s*=' \
