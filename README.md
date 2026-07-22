@@ -70,16 +70,15 @@ make collect-dry
 make main-tf
 ```
 
-## Proxy (SOCKS) и K2 Cloud
+## K2 Cloud notes
 
-AWS CLI **не умеет** нормально работать с `HTTPS_PROXY=socks5://...` (ошибка
-`http://socks5://127.0.0.1:7897`).
+- Для K2 используется AWS provider **4.67.0** (новые 5.x дергают API, которых нет в K2).
+- Импорт идёт **по одному ресурсу** (не через broken plan apply).
+- Сгенерированный HCL проходит санацию (пустые CIDR, throughput=0, …).
 
-Скрипт сам:
-- ходит в API K2 **напрямую** (без proxy)
-- качает Terraform-провайдер через proxy/`ALL_PROXY`, если он задан
+Перед повторным запуском после обновления скрипта:
 
 ```bash
-# так и оставляйте — proxy нужен для HashiCorp, K2 пойдёт напрямую
+rm -rf imported/.terraform imported/.terraform.lock.hcl
 proxy ./scripts/collect-aws-state.sh --rc ./c2rc.sh --auto-approve
 ```
