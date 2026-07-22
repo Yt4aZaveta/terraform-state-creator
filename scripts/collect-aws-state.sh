@@ -85,11 +85,54 @@ export AWS_REGION
 export AWS_DEFAULT_REGION="${AWS_REGION}"
 
 # ---------------------------------------------------------------------------
+detect_platform() {
+  local os arch
+  os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+  arch="$(uname -m)"
+  case "${arch}" in
+    x86_64|amd64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    *) die "Unsupported architecture: ${arch}" ;;
+  esac
+  case "${os}" in
+    linux)  TF_OS="linux";  AWSCLI_OS="linux" ;;
+    darwin) TF_OS="darwin"; AWSCLI_OS="darwin" ;;
+    *) die "Unsupported OS: ${os}. Install aws/terraform manually, then re-run with --no-install-deps." ;;
+  esac
+  TF_ARCH="${arch}"
+  # AWS CLI bundle naming
+  case "${AWSCLI_OS}-${arch}" in
+    linux-amd64)  AWSCLI_BUNDLE="https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" ;;
+    linux-arm64)  AWSCLI_BUNDLE="https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" ;;
+    darwin-amd64|darwin-arm64)
+      AWSCLI_BUNDLE=""  # use brew / pkg on macOS
+      ;;
+  esac
+}
+
+terraform_works() {
+  have terraform && terraform version >/dev/null 2>&1
+}
+
+aws_works() {
+  have aws && aws --version >/dev/null 2>&1
+}
+
 install_aws_cli() {
-  log "Installing AWS CLI v2..."
+  detect_platform
+  log "Installing AWS CLI v2 (${AWSCLI_OS}/${TF_ARCH})..."
+
+  if [[ "${AWSCLI_OS}" == "darwin" ]]; then
+    if have brew; then
+      brew install awscli
+      return 0
+    fi
+    die "On macOS install AWS CLI: brew install awscli  (or https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)"
+  fi
+
   local tmp
   tmp="$(mktemp -d)"
-  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "${tmp}/awscliv2.zip"
+  curl -fsSL "${AWSCLI_BUNDLE}" -o "${tmp}/awscliv2.zip"
   have unzip || die "unzip is required to install AWS CLI"
   unzip -q "${tmp}/awscliv2.zip" -d "${tmp}"
   if [[ -w /usr/local ]]; then
@@ -103,18 +146,42 @@ install_aws_cli() {
 }
 
 install_terraform() {
-  log "Installing Terraform..."
-  local ver="1.9.8"
+  detect_platform
+  local ver="${TERRAFORM_VERSION:-1.9.8}"
+  local url="https://releases.hashicorp.com/terraform/${ver}/terraform_${ver}_${TF_OS}_${TF_ARCH}.zip"
+
+  # Prefer Homebrew on macOS when available
+  if [[ "${TF_OS}" == "darwin" ]] && have brew; then
+    log "Installing Terraform via Homebrew..."
+    brew install terraform
+    hash -r 2>/dev/null || true
+    if terraform_works; then
+      return 0
+    fi
+    warn "brew install terraform did not yield a working binary — trying HashiCorp zip"
+  fi
+
+  log "Installing Terraform ${ver} (${TF_OS}_${TF_ARCH})..."
   local tmp
   tmp="$(mktemp -d)"
-  curl -fsSL "https://releases.hashicorp.com/terraform/${ver}/terraform_${ver}_linux_amd64.zip" -o "${tmp}/tf.zip"
+  if ! curl -fsSL "${url}" -o "${tmp}/tf.zip"; then
+    rm -rf "${tmp}"
+    die "Failed to download ${url}. Check network/proxy, or: brew install terraform"
+  fi
   have unzip || die "unzip is required to install Terraform"
   unzip -q "${tmp}/tf.zip" -d "${tmp}"
+
+  # Replace broken previous downloads (e.g. linux binary on Mac)
   mkdir -p "${HOME}/.local/bin"
-  mv "${tmp}/terraform" "${HOME}/.local/bin/terraform"
-  chmod +x "${HOME}/.local/bin/terraform"
+  local dest="${HOME}/.local/bin/terraform"
+  rm -f "${dest}"
+  mv "${tmp}/terraform" "${dest}"
+  chmod +x "${dest}"
   export PATH="${HOME}/.local/bin:${PATH}"
+  hash -r 2>/dev/null || true
   rm -rf "${tmp}"
+
+  terraform_works || die "Installed terraform at ${dest} but it does not run on this platform"
 }
 
 ensure_deps() {
@@ -124,7 +191,10 @@ ensure_deps() {
     return 0
   fi
 
-  if ! have aws; then
+  # Put ~/.local/bin first so a fresh install wins over a broken one earlier in PATH
+  export PATH="${HOME}/.local/bin:${PATH}"
+
+  if ! aws_works; then
     if [[ "${INSTALL_DEPS}" == true ]]; then
       install_aws_cli
     else
@@ -133,11 +203,17 @@ ensure_deps() {
   fi
 
   if [[ "${SKIP_IMPORT}" != true ]]; then
-    if ! have terraform; then
+    if ! terraform_works; then
       if [[ "${INSTALL_DEPS}" == true ]]; then
+        # Remove non-executable / wrong-arch stub so we can replace it
+        if have terraform; then
+          local bad
+          bad="$(command -v terraform)"
+          warn "Existing terraform at ${bad} does not run — reinstalling for this OS/arch"
+        fi
         install_terraform
       else
-        die "terraform is required"
+        die "terraform is required (brew install terraform)"
       fi
     fi
     local tfver
