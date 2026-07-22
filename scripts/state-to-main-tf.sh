@@ -67,78 +67,18 @@ log "State: ${STATE_FILE} (${resource_count} managed resources)"
 # ---------------------------------------------------------------------------
 # Offline: approximate HCL from state attributes
 # ---------------------------------------------------------------------------
-hcl_escape() {
-  # Escape for HCL quoted string
-  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
-}
-
 dump_main_tf() {
   local state="$1"
   local out="$2"
+  local raw="${out}.raw"
 
   log "Dumping approximate main.tf from state JSON (offline)..."
+  have python3 || die "python3 is required for offline state→HCL dump"
 
-  {
-    cat <<'EOF'
-# =============================================================================
-# main.tf — offline dump from terraform.tfstate
-# Complex nested attributes use jsondecode(...) — review and replace with blocks.
-# Prefer: ./scripts/state-to-main-tf.sh --generate  (accurate HCL via AWS)
-# =============================================================================
-
-EOF
-
-    jq -r '
-      def hcl($v):
-        if $v == null then empty
-        elif ($v|type) == "boolean" or ($v|type) == "number" then "\($v)"
-        elif ($v|type) == "string" then ($v|@json)
-        elif ($v|type) == "array" then
-          if ($v|length) == 0 then "[]"
-          elif all($v[]; type != "object") then
-            "[" + ($v | map(hcl(.)) | join(", ")) + "]"
-          else
-            "jsondecode(" + ($v|tojson|@json) + ")"
-          end
-        elif ($v|type) == "object" then
-          "jsondecode(" + ($v|tojson|@json) + ")"
-        else ($v|@json)
-        end;
-
-      .resources[]
-      | select(.mode=="managed")
-      | . as $res
-      | ($res.instances[0].attributes_flat // $res.instances[0].attributes // {}) as $attrs
-      | (
-          ["resource \($res.type|@json) \($res.name|@json) {"]
-          + (
-              if ($attrs|type) == "object" then
-                [
-                  $attrs
-                  | to_entries[]
-                  | select(.value != null)
-                  | select(.key | (startswith("%") or contains(".")) | not)
-                  | select(
-                      .key as $k
-                      | (["id","arn","owner_id","unique_id","availability_zone_id",
-                          "primary_network_interface_id","instance_state",
-                          "default_network_acl_id","default_route_table_id",
-                          "default_security_group_id","dhcp_options_id",
-                          "main_route_table_id","ipv6_association_id",
-                          "vpc_arn","domain_name","zone_id","hosted_zone_id",
-                          "caller_reference"] | index($k))
-                      | not
-                    )
-                  | "  \(.key) = \(hcl(.value))"
-                ]
-              else
-                ["  # (no attributes)"]
-              end
-            )
-          + ["}", ""]
-        )[]
-    ' "${state}"
-  } > "${out}"
+  python3 "${SCRIPT_DIR}/lib/state_to_hcl.py" "${state}" "${raw}"
+  # Extra scrub for K2 / leftover junk (safe on AWS too)
+  sanitize_generated_hcl "${raw}" "${out}"
+  rm -f "${raw}"
 
   log "Wrote ${out}"
 }

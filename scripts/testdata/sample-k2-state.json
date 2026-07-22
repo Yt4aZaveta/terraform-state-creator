@@ -1,0 +1,216 @@
+{
+  "version": 4,
+  "terraform_version": "1.15.8",
+  "resources": [
+    {
+      "mode": "managed",
+      "type": "aws_eip",
+      "name": "eipalloc_9aadeed4",
+      "provider": "provider[\"hc-registry.website.k2.cloud/c2devel/rockitcloud\"]",
+      "instances": [
+        {
+          "attributes": {
+            "allocation_id": "eipalloc-9AADEED4",
+            "association_id": "eipassoc-2FEBCE73",
+            "domain": "vpc",
+            "id": "eipalloc-9AADEED4",
+            "instance": "i-45B42982",
+            "network_interface": "eni-XXXX",
+            "private_ip": "172.16.0.4",
+            "public_ip": "93.183.64.35",
+            "tags": {},
+            "tags_all": {},
+            "vpc": true
+          }
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "aws_instance",
+      "name": "i_45b42982",
+      "provider": "provider[\"hc-registry.website.k2.cloud/c2devel/rockitcloud\"]",
+      "instances": [
+        {
+          "attributes": {
+            "ami": "cmi-XXXX",
+            "availability_zone": "ru-msk-comp1p",
+            "capacity_reservation_specification": [],
+            "credit_specification": [],
+            "ebs_block_device": [
+              {
+                "delete_on_termination": true,
+                "device_name": "disk2",
+                "encrypted": false,
+                "iops": 500,
+                "kms_key_id": "",
+                "snapshot_id": "",
+                "tags": {"Name": "Disk for i-45B42982"},
+                "throughput": 0,
+                "volume_id": "vol-4DA5FE02",
+                "volume_size": 100,
+                "volume_type": "st3"
+              }
+            ],
+            "enclave_options": [],
+            "ephemeral_block_device": [],
+            "id": "i-45B42982",
+            "instance_type": "m1.small",
+            "key_name": "mykey",
+            "launch_template": [],
+            "maintenance_options": [],
+            "metadata_options": [],
+            "network_interface": [],
+            "root_block_device": [
+              {
+                "delete_on_termination": true,
+                "device_name": "disk1",
+                "encrypted": false,
+                "iops": 320,
+                "kms_key_id": "",
+                "tags": {"Name": "Disk for i-45B42982"},
+                "throughput": 0,
+                "volume_id": "vol-2D826582",
+                "volume_size": 32,
+                "volume_type": "gp2"
+              }
+            ],
+            "subnet_id": "subnet-49083982",
+            "tags": {"Name": "lab"},
+            "tags_all": {"Name": "lab"},
+            "vpc_security_group_ids": ["sg-255640d3"]
+          }
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "aws_route_table",
+      "name": "rtb_bcb9d57d",
+      "provider": "provider[\"hc-registry.website.k2.cloud/c2devel/rockitcloud\"]",
+      "instances": [
+        {
+          "attributes": {
+            "id": "rtb-BCB9D57D",
+            "route": [
+              {
+                "carrier_gateway_id": "",
+                "cidr_block": "0.0.0.0/0",
+                "core_network_arn": "",
+                "destination_prefix_list_id": "",
+                "egress_only_gateway_id": "",
+                "gateway_id": "igw-B47744D7",
+                "instance_id": "",
+                "ipv6_cidr_block": "",
+                "local_gateway_id": "",
+                "nat_gateway_id": "",
+                "network_interface_id": "",
+                "transit_gateway_id": "",
+                "vpc_endpoint_id": "",
+                "vpc_peering_connection_id": ""
+              },
+              {
+                "carrier_gateway_id": "",
+                "cidr_block": "172.72.0.0/16",
+                "core_network_arn": "",
+                "destination_prefix_list_id": "",
+                "egress_only_gateway_id": "",
+                "gateway_id": "",
+                "instance_id": "",
+                "ipv6_cidr_block": "",
+                "local_gateway_id": "",
+                "nat_gateway_id": "",
+                "network_interface_id": "",
+                "transit_gateway_id": "tgw-ADB6413C",
+                "vpc_endpoint_id": "",
+                "vpc_peering_connection_id": ""
+              }
+            ],
+            "tags": {},
+            "tags_all": {},
+            "vpc_id": "vpc-B47744D7"
+          }
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "aws_s3_bucket",
+      "name": "s3_bucket_linux_lab_backup",
+      "provider": "provider[\"hc-registry.website.k2.cloud/c2devel/rockitcloud\"]",
+      "instances": [
+        {
+          "attributes": {
+            "acl": "private",
+            "bucket": "linux-lab-backup",
+            "cors_rule": [],
+            "force_destroy": false,
+            "grant": [
+              {
+                "id": "",
+                "permissions": ["READ", "WRITE"],
+                "type": "Group",
+                "uri": "http://acs.amazonaws.com/groups/global/AuthenticatedUsers"
+              },
+              {
+                "id": "cf1f975c-955a-49bc-a456-b3d24ff11eb1",
+                "permissions": ["FULL_CONTROL"],
+                "type": "CanonicalUser",
+                "uri": ""
+              }
+            ],
+            "id": "linux-lab-backup",
+            "lifecycle_rule": [],
+            "logging": [],
+            "object_lock_configuration": [],
+            "replication_configuration": [{"role": "", "rules": []}],
+            "server_side_encryption_configuration": [{"rule": []}],
+            "tags": {},
+            "tags_all": {},
+            "versioning": [{"enabled": false, "mfa_delete": false}],
+            "website": []
+          }
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "aws_security_group",
+      "name": "sg_255640d3",
+      "provider": "provider[\"hc-registry.website.k2.cloud/c2devel/rockitcloud\"]",
+      "instances": [
+        {
+          "attributes": {
+            "description": "lab sg",
+            "id": "sg-255640d3",
+            "name": "ru.yt4azaveta.xyz",
+            "name_prefix": "",
+            "tags": {},
+            "tags_all": {},
+            "vpc_id": "vpc-B47744D7"
+          }
+        }
+      ]
+    },
+    {
+      "mode": "managed",
+      "type": "aws_subnet",
+      "name": "subnet_49083982",
+      "provider": "provider[\"hc-registry.website.k2.cloud/c2devel/rockitcloud\"]",
+      "instances": [
+        {
+          "attributes": {
+            "availability_zone": "ru-msk-comp1p",
+            "cidr_block": "172.16.0.0/24",
+            "id": "subnet-49083982",
+            "ipv6_cidr_block_association_id": "",
+            "map_public_ip_on_launch": true,
+            "tags": {},
+            "tags_all": {},
+            "vpc_id": "vpc-B47744D7"
+          }
+        }
+      ]
+    }
+  ]
+}

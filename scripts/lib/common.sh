@@ -458,14 +458,35 @@ drop_line = re.compile(
     r'bucket_domain_name|bucket_regional_domain_name|hosted_zone_id|'
     r'carrier_ip|customer_owned_ip|network_border_group|'
     r'private_dns|public_dns|public_ipv4_pool|'
+    r'allocation_id|association_id|domain|private_ip|public_ip|'
+    r'ipv6_cidr_block_association_id|ipv6_association_id|'
     r'region\s*=\s*(?:null|"us-east-1")'
     r')\s*=.*$',
     re.M,
 )
 text = drop_line.sub('', text)
 
+# name_prefix conflicts with name when both present; empty prefix is useless
+text = re.sub(r'^\s*name_prefix\s*=\s*""\s*$', '', text, flags=re.M)
+
 # Also drop null-valued optional junk
 text = re.sub(r'^\s*\w+\s*=\s*null\s*$', '', text, flags=re.M)
+
+# Drop empty-string assignments (often invalid CIDRs / unused optionals)
+text = re.sub(r'^\s*\w+\s*=\s*""\s*$', '', text, flags=re.M)
+
+# Drop argument-style empty block lists left by older dumps
+text = re.sub(
+    r'^\s*(?:capacity_reservation_specification|credit_specification|'
+    r'ebs_block_device|enclave_options|ephemeral_block_device|launch_template|'
+    r'maintenance_options|metadata_options|network_interface|root_block_device|'
+    r'cors_rule|grant|lifecycle_rule|logging|object_lock_configuration|'
+    r'replication_configuration|server_side_encryption_configuration|'
+    r'versioning|website|route|ingress|egress)\s*=\s*(?:\[\]|jsondecode\([^)]*\))\s*$',
+    '',
+    text,
+    flags=re.M,
+)
 
 # Remove route blocks with empty cidr / ipv6 cidr
 text = re.sub(

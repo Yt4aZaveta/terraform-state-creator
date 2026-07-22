@@ -42,6 +42,16 @@ ROCKITCLOUD_USE_MIRROR=1 proxy ./scripts/collect-aws-state.sh --rc ./c2rc.sh --a
 
 ## Пересобрать main.tf из state
 
+После импорта (или после `git pull` с фиксом дампера) можно пересобрать HCL **без повторного import**:
+
+```bash
+./scripts/state-to-main-tf.sh --dump -w imported
+cd imported && terraform plan
+```
+
+Офлайн-дамп пишет nested-атрибуты как HCL-блоки и отбрасывает computed-поля
+(`allocation_id`, пустые `name_prefix`, `jsondecode(...)`, и т.п.).
+
 ```bash
 set -a && source ./c2rc.sh && set +a
 ./scripts/state-to-main-tf.sh --dump
