@@ -2,34 +2,32 @@
 
 Сканирует инфраструктуру в **K2 Cloud** (или AWS) и собирает локальный Terraform state + `main.tf`.
 
-## K2 Cloud — креды через c2rc.sh
+## K2 Cloud
+
+Используется официальный провайдер **[c2devel/rockitcloud](https://docs.k2.cloud/ru/api/tools/terraform.html)**
+(зеркало `hc-registry.website.k2.cloud`), а не `hashicorp/aws`.
 
 ```bash
-# 1. Скопируйте шаблон и заполните секреты
-cp templates/c2rc.sh.example ./c2rc.sh
-# отредактируйте C2_PROJECT / BASE_ACCESS_KEY / EC2_SECRET_KEY
+cp templates/c2rc.sh.example ./c2rc.sh   # заполнить секреты
 
-# 2. Запустите
-./scripts/collect-aws-state.sh --rc ./c2rc.sh --auto-approve
+# proxy нужен только если GitHub/HashiCorp недоступны; к K2 скрипт ходит напрямую
+proxy ./scripts/collect-aws-state.sh --rc ./c2rc.sh --auto-approve
 ```
 
-Формат `c2rc.sh` — как у K2 Cloud:
+Перед повторным запуском после смены провайдера:
 
 ```bash
-export C2_PROJECT="..."
-export BASE_ACCESS_KEY="..."
-export EC2_ACCESS_KEY="${C2_PROJECT}:${BASE_ACCESS_KEY}"
-export EC2_SECRET_KEY="..."
-export AWS_ACCESS_KEY_ID="$EC2_ACCESS_KEY"
-export AWS_SECRET_ACCESS_KEY="$EC2_SECRET_KEY"
-export EC2_URL="https://ec2.ru-msk.k2.cloud"
-export S3_URL="https://s3.ru-msk.k2.cloud"
-# ... остальные endpoint'ы
+rm -rf imported/.terraform imported/.terraform.lock.hcl
+# при смене с hashicorp/aws также лучше начать state заново:
+rm -f imported/terraform.tfstate
+proxy ./scripts/collect-aws-state.sh --rc ./c2rc.sh --auto-approve
 ```
 
-Скрипт сам подхватит ключи и endpoint'ы, выставит регион (`ru-msk` из URL) и напишет `provider.tf` с блоком `endpoints`.
+Если registry K2 недоступен — офлайн-зеркало с GitHub:
 
-**Не коммитьте** `c2rc.sh` и `imported/terraform.tfvars` — они в `.gitignore`.
+```bash
+ROCKITCLOUD_USE_MIRROR=1 proxy ./scripts/collect-aws-state.sh --rc ./c2rc.sh --auto-approve
+```
 
 ## Что получается
 
@@ -37,21 +35,16 @@ export S3_URL="https://s3.ru-msk.k2.cloud"
 |------|------------|
 | `imported/main.tf` | Код инфраструктуры |
 | `imported/terraform.tfstate` | Локальный state (можно в git) |
-| `imported/provider.tf` | Provider + endpoints K2 |
+| `imported/provider.tf` | `c2devel/rockitcloud` + region/`endpoints` |
 | `imported/inventory.json` | Список найденных ресурсов |
+
+`c2rc.sh` и `terraform.tfvars` — в `.gitignore`, не коммитьте.
 
 ## Пересобрать main.tf из state
 
 ```bash
-./scripts/state-to-main-tf.sh --generate   # через API (нужен --rc / креды в env)
-./scripts/state-to-main-tf.sh --dump       # офлайн из state JSON
-```
-
-Для generate с K2 снова укажите rc:
-
-```bash
 set -a && source ./c2rc.sh && set +a
-./scripts/state-to-main-tf.sh --generate
+./scripts/state-to-main-tf.sh --dump
 ```
 
 ## Узкий скан
@@ -60,25 +53,12 @@ set -a && source ./c2rc.sh && set +a
 ./scripts/collect-aws-state.sh --rc ./c2rc.sh -s vpc,subnet,sg,ec2 --auto-approve
 ```
 
-По умолчанию для K2: `vpc`, `subnet`, `route_table`, `igw`, `nat`, `eip`, `sg`, `ec2`, `ebs`, `s3`, `elb`.
+## Proxy (SOCKS)
 
-## Make
+AWS CLI ломается на `HTTPS_PROXY=socks5://...`. Скрипт сам ходит в K2 без proxy;
+proxy остаётся для скачивания провайдера с GitHub при необходимости.
 
-```bash
-make collect RC=./c2rc.sh
-make collect-dry
-make main-tf
-```
+## Требования
 
-## K2 Cloud notes
-
-- Для K2 используется AWS provider **4.67.0** (новые 5.x дергают API, которых нет в K2).
-- Импорт идёт **по одному ресурсу** (не через broken plan apply).
-- Сгенерированный HCL проходит санацию (пустые CIDR, throughput=0, …).
-
-Перед повторным запуском после обновления скрипта:
-
-```bash
-rm -rf imported/.terraform imported/.terraform.lock.hcl
-proxy ./scripts/collect-aws-state.sh --rc ./c2rc.sh --auto-approve
-```
+- `jq`, `aws` CLI, `terraform` ≥ 1.5
+- `c2rc.sh` для K2

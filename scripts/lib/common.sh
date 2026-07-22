@@ -104,7 +104,7 @@ source_cloud_rc() {
 # After loading c2rc: K2 API is usually reachable directly.
 # AWS CLI breaks on HTTPS_PROXY=socks5://... (turns into http://socks5://...).
 configure_network_for_cloud() {
-  local extras=".k2.cloud,k2.cloud"
+  local extras=".k2.cloud,k2.cloud,hc-registry.website.k2.cloud"
   extras+=",ec2.ru-msk.k2.cloud,s3.ru-msk.k2.cloud,elb.ru-msk.k2.cloud"
   extras+=",iam.k2.cloud,route53.k2.cloud,eks.ru-msk.k2.cloud"
   extras+=",localhost,127.0.0.1"
@@ -178,11 +178,80 @@ verify_cloud_credentials() {
   fi
 }
 
-# Emit Terraform provider "aws" block for current env (K2 endpoints when set).
-# Writes to stdout.
+# Emit Terraform provider block (K2 → c2devel/rockitcloud, else hashicorp/aws).
+# Docs: https://docs.k2.cloud/ru/api/tools/terraform.html
 emit_provider_tf() {
   local region="${AWS_REGION:-ru-msk}"
 
+  if is_k2_cloud; then
+    local src="${ROCKITCLOUD_PROVIDER_SOURCE:-hc-registry.website.k2.cloud/c2devel/rockitcloud}"
+    local ver="${ROCKITCLOUD_PROVIDER_VERSION:-~> 25.2}"
+    cat <<EOF
+# Generated for K2 Cloud — provider: c2devel/rockitcloud
+# https://docs.k2.cloud/ru/api/tools/terraform.html
+terraform {
+  required_version = ">= 1.5.0"
+
+  required_providers {
+    aws = {
+      # Official K2 Cloud provider (AWS-compatible resource names)
+      source  = "${src}"
+      version = "${ver}"
+    }
+  }
+}
+
+# Block is named "aws" for backward compatibility with AWS configs
+provider "aws" {
+  insecure   = false
+  region     = "${region}"
+  access_key = var.aws_access_key_id
+  secret_key = var.aws_secret_access_key
+
+  # With a real K2 region (ru-msk / …) the provider builds API endpoints itself.
+  # Explicit endpoints from c2rc are kept as overrides when set.
+EOF
+    # Only emit endpoints block if at least EC2_URL is present (from c2rc)
+    if [[ -n "${EC2_URL:-}" ]]; then
+      cat <<EOF
+
+  endpoints {
+EOF
+      [[ -n "${EC2_URL:-}" ]] && printf '    ec2           = "%s"\n' "${EC2_URL}"
+      [[ -n "${S3_URL:-}" ]] && printf '    s3            = "%s"\n' "${S3_URL}"
+      [[ -n "${ELB_URL:-}" ]] && printf '    elbv2         = "%s"\n' "${ELB_URL}"
+      [[ -n "${IAM_URL:-}" ]] && printf '    iam           = "%s"\n' "${IAM_URL}"
+      [[ -n "${ROUTE53_URL:-}" ]] && printf '    route53       = "%s"\n' "${ROUTE53_URL}"
+      [[ -n "${AUTO_SCALING_URL:-}" ]] && printf '    autoscaling   = "%s"\n' "${AUTO_SCALING_URL}"
+      [[ -n "${AWS_CLOUDWATCH_URL:-}" ]] && printf '    cloudwatch    = "%s"\n' "${AWS_CLOUDWATCH_URL}"
+      [[ -n "${DIRECT_CONNECT_URL:-}" ]] && printf '    directconnect = "%s"\n' "${DIRECT_CONNECT_URL}"
+      [[ -n "${EFS_URL:-}" ]] && printf '    efs           = "%s"\n' "${EFS_URL}"
+      [[ -n "${EKS_URL:-}" ]] && printf '    eks           = "%s"\n' "${EKS_URL}"
+      [[ -n "${PAAS_URL:-}" ]] && printf '    paas          = "%s"\n' "${PAAS_URL}"
+      [[ -n "${BACKUP_URL:-}" ]] && printf '    backup        = "%s"\n' "${BACKUP_URL}"
+      cat <<'EOF'
+  }
+EOF
+    fi
+    cat <<'EOF'
+}
+
+variable "aws_access_key_id" {
+  type        = string
+  sensitive   = true
+  description = "K2 Cloud access key (from c2rc EC2_ACCESS_KEY)"
+}
+
+variable "aws_secret_access_key" {
+  type        = string
+  sensitive   = true
+  description = "K2 Cloud secret key (from c2rc EC2_SECRET_KEY)"
+}
+EOF
+    return 0
+  fi
+
+  # Vanilla AWS
   cat <<EOF
 terraform {
   required_version = ">= 1.5.0"
@@ -196,54 +265,20 @@ terraform {
 }
 
 provider "aws" {
-  region     = "${region}"
-  access_key = var.aws_access_key_id
-  secret_key = var.aws_secret_access_key
-
-  # Compatible clouds (K2) and custom endpoints
-  skip_credentials_validation = ${IS_COMPAT_CLOUD:-false}
+  region                      = "${region}"
+  access_key                  = var.aws_access_key_id
+  secret_key                  = var.aws_secret_access_key
   skip_metadata_api_check     = true
-  skip_region_validation      = ${IS_COMPAT_CLOUD:-false}
-  skip_requesting_account_id  = ${IS_COMPAT_CLOUD:-false}
-  s3_use_path_style           = ${IS_COMPAT_CLOUD:-false}
-EOF
-
-  if is_k2_cloud; then
-    cat <<EOF
-
-  endpoints {
-EOF
-    [[ -n "${EC2_URL:-}" ]] && printf '    ec2            = "%s"\n' "${EC2_URL}"
-    [[ -n "${S3_URL:-}" ]] && printf '    s3             = "%s"\n' "${S3_URL}"
-    [[ -n "${ELB_URL:-}" ]] && printf '    elbv2          = "%s"\n' "${ELB_URL}"
-    [[ -n "${IAM_URL:-}" ]] && printf '    iam            = "%s"\n' "${IAM_URL}"
-    [[ -n "${ROUTE53_URL:-}" ]] && printf '    route53        = "%s"\n' "${ROUTE53_URL}"
-    [[ -n "${AUTO_SCALING_URL:-}" ]] && printf '    autoscaling    = "%s"\n' "${AUTO_SCALING_URL}"
-    [[ -n "${AWS_CLOUDWATCH_URL:-}" ]] && printf '    cloudwatch     = "%s"\n' "${AWS_CLOUDWATCH_URL}"
-    [[ -n "${DIRECT_CONNECT_URL:-}" ]] && printf '    directconnect  = "%s"\n' "${DIRECT_CONNECT_URL}"
-    [[ -n "${EFS_URL:-}" ]] && printf '    efs            = "%s"\n' "${EFS_URL}"
-    [[ -n "${EKS_URL:-}" ]] && printf '    eks            = "%s"\n' "${EKS_URL}"
-    [[ -n "${KMS_URL:-}" ]] && printf '    kms            = "%s"\n' "${KMS_URL}"
-    [[ -n "${SQS_URL:-}" ]] && printf '    sqs            = "%s"\n' "${SQS_URL}"
-    [[ -n "${BACKUP_URL:-}" ]] && printf '    backup         = "%s"\n' "${BACKUP_URL}"
-    cat <<'EOF'
-  }
-EOF
-  fi
-
-  cat <<'EOF'
 }
 
 variable "aws_access_key_id" {
-  type        = string
-  sensitive   = true
-  description = "Cloud access key (from c2rc / AWS)"
+  type      = string
+  sensitive = true
 }
 
 variable "aws_secret_access_key" {
-  type        = string
-  sensitive   = true
-  description = "Cloud secret key (from c2rc / AWS)"
+  type      = string
+  sensitive = true
 }
 EOF
 }
@@ -277,69 +312,123 @@ detect_tf_platform() {
   TF_ARCH="${arch}"
 }
 
-# Download hashicorp/aws into a local filesystem mirror and point Terraform at it.
-# Avoids registry.terraform.io (often blocked without proxy).
-# Sets: TF_CLI_CONFIG_FILE, AWS_PROVIDER_VERSION
+# Prepare provider installation for the current cloud.
+# K2: prefer hc-registry.website.k2.cloud (rockitcloud); fallback GitHub filesystem mirror.
+# AWS: hashicorp/aws from releases.hashicorp.com filesystem mirror.
 ensure_aws_provider_mirror() {
   local mirror_root="${1:-${HOME}/.terraform.d/mirror}"
-  # K2 Cloud: older AWS provider avoids unsupported Describe*Attribute calls
-  local default_ver="5.100.0"
-  if is_k2_cloud; then
-    default_ver="4.67.0"
-  fi
-  local ver="${AWS_PROVIDER_VERSION:-${default_ver}}"
   detect_tf_platform
 
+  if is_k2_cloud; then
+    ensure_rockitcloud_provider "${mirror_root}"
+    return $?
+  fi
+
+  local ver="${AWS_PROVIDER_VERSION:-5.100.0}"
   local dest_dir="${mirror_root}/registry.terraform.io/hashicorp/aws/${ver}/${TF_OS}_${TF_ARCH}"
   local url="https://releases.hashicorp.com/terraform-provider-aws/${ver}/terraform-provider-aws_${ver}_${TF_OS}_${TF_ARCH}.zip"
 
   if [[ ! -d "${dest_dir}" ]] || [[ -z "$(find "${dest_dir}" -type f -name 'terraform-provider-aws*' 2>/dev/null | head -1)" ]]; then
     log "Downloading hashicorp/aws ${ver} (${TF_OS}_${TF_ARCH}) into local mirror..."
-    log "URL: ${url}"
-    local tmp
-    tmp="$(mktemp -d)"
-    if ! curl -fsSL "${url}" -o "${tmp}/provider.zip"; then
-      # Retry with explicit ALL_PROXY if user had socks only in HTTPS_PROXY
-      if [[ -n "${ALL_PROXY:-}${all_proxy:-}${HTTPS_PROXY:-}" ]]; then
-        warn "Direct download failed — retrying via proxy..."
-        if ! curl -fsSL --proxy "${ALL_PROXY:-${all_proxy:-${HTTPS_PROXY:-${https_proxy:-}}}}" \
-            "${url}" -o "${tmp}/provider.zip"; then
-          rm -rf "${tmp}"
-          die "Cannot download AWS provider from releases.hashicorp.com.
-  • With proxy:  proxy ./scripts/collect-aws-state.sh --rc ./c2rc.sh --auto-approve
-  • Or:          HTTPS_PROXY=socks5://127.0.0.1:7897 ./scripts/collect-aws-state.sh ..."
-        fi
-      else
-        rm -rf "${tmp}"
-        die "Cannot download AWS provider from releases.hashicorp.com.
-  • With proxy:  proxy ./scripts/collect-aws-state.sh --rc ./c2rc.sh --auto-approve"
-      fi
-    fi
-    have unzip || die "unzip is required"
-    mkdir -p "${dest_dir}"
-    unzip -qo "${tmp}/provider.zip" -d "${dest_dir}"
-    chmod +x "${dest_dir}"/terraform-provider-aws* 2>/dev/null || true
-    rm -rf "${tmp}"
-    log "Installed provider → ${dest_dir}"
+    download_zip_to_dir "${url}" "${dest_dir}"
   else
     log "Using cached provider mirror: ${dest_dir}"
   fi
 
+  write_filesystem_mirror_rc "${mirror_root}" "registry.terraform.io/hashicorp/aws"
+  export AWS_PROVIDER_VERSION="${ver}"
+  log "TF_CLI_CONFIG_FILE=${TF_CLI_CONFIG_FILE} (aws provider ${ver})"
+}
+
+download_zip_to_dir() {
+  local url="$1"
+  local dest_dir="$2"
+  local tmp
+  tmp="$(mktemp -d)"
+  log "URL: ${url}"
+  if ! curl -fsSL "${url}" -o "${tmp}/provider.zip"; then
+    if [[ -n "${ALL_PROXY:-}${all_proxy:-}${HTTPS_PROXY:-}" ]]; then
+      warn "Direct download failed — retrying via proxy..."
+      if ! curl -fsSL --proxy "${ALL_PROXY:-${all_proxy:-${HTTPS_PROXY:-${https_proxy:-}}}}" \
+          "${url}" -o "${tmp}/provider.zip"; then
+        rm -rf "${tmp}"
+        return 1
+      fi
+    else
+      rm -rf "${tmp}"
+      return 1
+    fi
+  fi
+  have unzip || die "unzip is required"
+  mkdir -p "${dest_dir}"
+  unzip -qo "${tmp}/provider.zip" -d "${dest_dir}"
+  chmod +x "${dest_dir}"/terraform-provider-* 2>/dev/null || true
+  rm -rf "${tmp}"
+  log "Installed provider → ${dest_dir}"
+}
+
+write_filesystem_mirror_rc() {
+  local mirror_root="$1"
+  local include_addr="$2"  # e.g. hc-registry.website.k2.cloud/c2devel/rockitcloud
   local rc_file="${mirror_root}/terraform.rc"
   cat > "${rc_file}" <<EOF
 provider_installation {
   filesystem_mirror {
     path    = "${mirror_root}"
-    include = ["registry.terraform.io/hashicorp/aws"]
+    include = ["${include_addr}"]
   }
   direct {
-    exclude = ["registry.terraform.io/hashicorp/aws"]
+    exclude = ["${include_addr}"]
   }
 }
 EOF
   export TF_CLI_CONFIG_FILE="${rc_file}"
-  export AWS_PROVIDER_VERSION="${ver}"
-  log "TF_CLI_CONFIG_FILE=${TF_CLI_CONFIG_FILE} (aws provider ${ver})"
+}
+
+# Install c2devel/rockitcloud for K2 Cloud.
+# 1) Let terraform init hit K2 registry (no TF_CLI_CONFIG_FILE) — preferred
+# 2) Or filesystem-mirror from GitHub releases if registry init is forced offline
+ensure_rockitcloud_provider() {
+  local mirror_root="$1"
+  detect_tf_platform
+  local ver="${ROCKITCLOUD_PROVIDER_VERSION_PIN:-25.5.2}"
+  local host_src="${ROCKITCLOUD_PROVIDER_SOURCE:-hc-registry.website.k2.cloud/c2devel/rockitcloud}"
+  # hostname/namespace/name for mirror path = source address
+  local dest_dir="${mirror_root}/${host_src}/${ver}/${TF_OS}_${TF_ARCH}"
+  local gh_url="https://github.com/C2Devel/terraform-provider-rockitcloud/releases/download/v${ver}/terraform-provider-rockitcloud_${ver}_${TF_OS}_${TF_ARCH}.zip"
+
+  export ROCKITCLOUD_PROVIDER_VERSION="${ROCKITCLOUD_PROVIDER_VERSION:-~> 25.2}"
+  export ROCKITCLOUD_PROVIDER_SOURCE="${host_src}"
+
+  # Prefer live K2 registry during terraform init (reachable as *.k2.cloud)
+  if [[ "${ROCKITCLOUD_USE_MIRROR:-}" != "1" ]]; then
+    unset TF_CLI_CONFIG_FILE || true
+    log "K2 provider: ${host_src} (terraform init will fetch from K2 registry)"
+    log "Optional offline mirror: ROCKITCLOUD_USE_MIRROR=1"
+    # Still prefetch into mirror as backup (does not force TF_CLI_CONFIG_FILE)
+    if [[ ! -d "${dest_dir}" ]] || [[ -z "$(find "${dest_dir}" -type f -name 'terraform-provider-rockitcloud*' 2>/dev/null | head -1)" ]]; then
+      log "Prefetching rockitcloud ${ver} into backup mirror (GitHub)..."
+      if download_zip_to_dir "${gh_url}" "${dest_dir}"; then
+        log "Backup mirror ready at ${dest_dir}"
+      else
+        warn "Could not prefetch rockitcloud from GitHub — terraform init will use K2 registry only"
+      fi
+    else
+      log "Backup mirror cached: ${dest_dir}"
+    fi
+    return 0
+  fi
+
+  # Forced filesystem mirror mode
+  if [[ ! -d "${dest_dir}" ]] || [[ -z "$(find "${dest_dir}" -type f -name 'terraform-provider-rockitcloud*' 2>/dev/null | head -1)" ]]; then
+    log "Downloading rockitcloud ${ver} into filesystem mirror..."
+    download_zip_to_dir "${gh_url}" "${dest_dir}" \
+      || die "Cannot download rockitcloud. Try proxy or unset ROCKITCLOUD_USE_MIRROR=1"
+  fi
+  write_filesystem_mirror_rc "${mirror_root}" "${host_src}"
+  # Pin exact version in provider.tf when using mirror
+  export ROCKITCLOUD_PROVIDER_VERSION="${ver}"
+  log "TF_CLI_CONFIG_FILE=${TF_CLI_CONFIG_FILE} (rockitcloud ${ver})"
 }
 
 # Strip attributes / blocks that break on K2 Cloud (AWS-compatible but incomplete API).

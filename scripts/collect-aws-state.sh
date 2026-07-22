@@ -357,12 +357,39 @@ run_terraform_import() {
 
   ensure_aws_provider_mirror "${HOME}/.terraform.d/mirror"
 
-  log "terraform init (local state + filesystem provider mirror)..."
-  if ! terraform init -input=false -backend=false; then
+  log "terraform init (local state)..."
+  set +e
+  terraform init -input=false -backend=false
+  local init_rc=$?
+  set -e
+
+  if [[ "${init_rc}" -ne 0 ]] && is_k2_cloud && [[ "${ROCKITCLOUD_USE_MIRROR:-}" != "1" ]]; then
+    warn "terraform init via K2 registry failed — retrying with GitHub filesystem mirror"
+    export ROCKITCLOUD_USE_MIRROR=1
+    ensure_aws_provider_mirror "${HOME}/.terraform.d/mirror"
+    # Rewrite provider.tf with exact pinned version for mirror
+    if is_k2_cloud; then export IS_COMPAT_CLOUD=true; fi
+    emit_provider_tf > provider.tf
+    write_tfvars .
+    terraform init -input=false -backend=false
+    init_rc=$?
+  fi
+
+  if [[ "${init_rc}" -ne 0 ]]; then
     warn "terraform init failed."
-    warn "If you use a proxy:  proxy ./scripts/collect-aws-state.sh --rc ./c2rc.sh --auto-approve"
+    warn "K2: ensure https://hc-registry.website.k2.cloud is reachable, or ROCKITCLOUD_USE_MIRROR=1 with proxy"
     popd >/dev/null
     return 1
+  fi
+
+  # If previous runs left hashicorp/aws in state, retarget to rockitcloud
+  if is_k2_cloud && [[ -f terraform.tfstate ]]; then
+    if grep -q 'registry.terraform.io/hashicorp/aws\|hashicorp/aws' terraform.tfstate 2>/dev/null; then
+      log "Replacing provider in state → rockitcloud..."
+      terraform state replace-provider -auto-approve \
+        registry.terraform.io/hashicorp/aws \
+        hc-registry.website.k2.cloud/c2devel/rockitcloud 2>/dev/null || true
+    fi
   fi
 
   local count
