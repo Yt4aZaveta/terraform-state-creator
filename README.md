@@ -70,13 +70,16 @@ make collect-dry
 make main-tf
 ```
 
-## Если registry.terraform.io недоступен
+## Proxy (SOCKS) и K2 Cloud
 
-Скрипт качает `hashicorp/aws` напрямую с `releases.hashicorp.com` в локальный mirror
-(`~/.terraform.d/mirror`) и не ходит в registry.
+AWS CLI **не умеет** нормально работать с `HTTPS_PROXY=socks5://...` (ошибка
+`http://socks5://127.0.0.1:7897`).
 
-Если и releases недоступны — запускайте через proxy:
+Скрипт сам:
+- ходит в API K2 **напрямую** (без proxy)
+- качает Terraform-провайдер через proxy/`ALL_PROXY`, если он задан
 
 ```bash
+# так и оставляйте — proxy нужен для HashiCorp, K2 пойдёт напрямую
 proxy ./scripts/collect-aws-state.sh --rc ./c2rc.sh --auto-approve
 ```
