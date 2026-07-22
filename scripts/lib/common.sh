@@ -282,7 +282,12 @@ detect_tf_platform() {
 # Sets: TF_CLI_CONFIG_FILE, AWS_PROVIDER_VERSION
 ensure_aws_provider_mirror() {
   local mirror_root="${1:-${HOME}/.terraform.d/mirror}"
-  local ver="${AWS_PROVIDER_VERSION:-5.100.0}"
+  # K2 Cloud: older AWS provider avoids unsupported Describe*Attribute calls
+  local default_ver="5.100.0"
+  if is_k2_cloud; then
+    default_ver="4.67.0"
+  fi
+  local ver="${AWS_PROVIDER_VERSION:-${default_ver}}"
   detect_tf_platform
 
   local dest_dir="${mirror_root}/registry.terraform.io/hashicorp/aws/${ver}/${TF_OS}_${TF_ARCH}"
@@ -334,5 +339,63 @@ provider_installation {
 EOF
   export TF_CLI_CONFIG_FILE="${rc_file}"
   export AWS_PROVIDER_VERSION="${ver}"
-  log "TF_CLI_CONFIG_FILE=${TF_CLI_CONFIG_FILE}"
+  log "TF_CLI_CONFIG_FILE=${TF_CLI_CONFIG_FILE} (aws provider ${ver})"
+}
+
+# Strip attributes / blocks that break on K2 Cloud (AWS-compatible but incomplete API).
+sanitize_generated_hcl() {
+  local src="$1"
+  local dest="$2"
+  [[ -f "${src}" ]] || return 1
+
+  if have python3; then
+    python3 - "${src}" "${dest}" <<'PY'
+import re, sys
+src, dest = sys.argv[1], sys.argv[2]
+text = open(src, encoding="utf-8").read()
+
+# Drop attribute lines known to break on K2 / empty-invalid values
+drop_line = re.compile(
+    r'^\s*(?:'
+    r'throughput|enable_lni_at_device_index|map_customer_owned_ip_on_launch|'
+    r'customer_owned_ipv4_pool|outpost_arn|enable_network_address_usage_metrics|'
+    r'disable_api_stop|disable_api_termination|instance_initiated_shutdown_behavior|'
+    r'ipv6_address_count|ipv6_native|enable_resource_name_dns_a_record_on_launch|'
+    r'enable_resource_name_dns_aaaa_record_on_launch|private_dns_hostname_type_on_launch|'
+    r'acceleration_status|request_payer|object_lock_enabled|'
+    r'bucket_domain_name|bucket_regional_domain_name|region\s*=\s*null'
+    r')\s*=.*$',
+    re.M,
+)
+text = drop_line.sub('', text)
+
+# Remove route blocks with empty cidr_block = ""
+text = re.sub(
+    r'\n\s*route\s*\{[^{}]*?cidr_block\s*=\s*""[^{}]*?\}',
+    '',
+    text,
+    flags=re.S,
+)
+
+# Remove empty replication_configuration / server_side_encryption_configuration shells
+text = re.sub(r'\n\s*replication_configuration\s*\{\s*role\s*=\s*null\s*\}', '', text)
+text = re.sub(r'\n\s*server_side_encryption_configuration\s*\{\s*\}', '', text)
+
+# Fix SG default description that forces replacement
+text = text.replace(
+    'description            = "Managed by Terraform"',
+    'description            = "default"',
+)
+
+# Collapse excessive blank lines
+text = re.sub(r'\n{3,}', '\n\n', text)
+open(dest, 'w', encoding='utf-8').write(text)
+print(dest)
+PY
+  else
+    # sed fallback
+    grep -Ev '^\s*(throughput|enable_lni_at_device_index|map_customer_owned_ip_on_launch|customer_owned_ipv4_pool|outpost_arn)\s*=' \
+      "${src}" > "${dest}.tmp" || true
+    mv "${dest}.tmp" "${dest}"
+  fi
 }
