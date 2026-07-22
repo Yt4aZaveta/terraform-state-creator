@@ -504,14 +504,6 @@ text = re.sub(
 text = re.sub(r'\n\s*replication_configuration\s*\{\s*(?:role\s*=\s*null\s*)?\}', '', text)
 text = re.sub(r'\n\s*server_side_encryption_configuration\s*\{\s*\}', '', text)
 
-# Drop Terraform's synthetic SG description that causes noisy drift
-text = re.sub(
-    r'^\s*description\s*=\s*"Managed by Terraform"\s*$',
-    '',
-    text,
-    flags=re.M,
-)
-
 # Collapse excessive blank lines
 text = re.sub(r'\n{3,}', '\n\n', text)
 open(dest, 'w', encoding='utf-8').write(text)

@@ -307,14 +307,30 @@ def resource_lines(rtype: str, name: str, attrs: dict[str, Any]) -> list[str]:
             lines.append(f"  {key} = {emit_value(value, 1)}")
             continue
 
-        # Plain argument
-        if isinstance(value, (dict, list)) and not (
-            isinstance(value, list) and value and not any(isinstance(x, (dict, list)) for x in value)
-        ):
-            # Complex non-block structures: skip rather than emit jsondecode
+        # Plain argument — scalars, scalar lists, and maps (tags)
+        if isinstance(value, dict):
+            # HCL map: all values must be scalars
+            if value and all(not isinstance(v, (dict, list)) for v in value.values()):
+                lines.append(f"  {key} = {emit_value(value, 1)}")
+            continue
+        if isinstance(value, list):
+            if value and any(isinstance(x, (dict, list)) for x in value):
+                continue  # complex nested; only emit via BLOCK_ATTRS
+            lines.append(f"  {key} = {emit_value(value, 1)}")
             continue
 
         lines.append(f"  {key} = {emit_value(value, 1)}")
+
+    # Provider defaults that otherwise show up as noisy in-place updates
+    if rtype == "aws_security_group":
+        desc = attrs.get("description")
+        if is_empty(desc):
+            lines.append('  description = "Managed by Terraform"')
+        if "revoke_rules_on_delete" not in attrs or attrs.get("revoke_rules_on_delete") is None:
+            lines.append("  revoke_rules_on_delete = false")
+    if rtype == "aws_instance":
+        if attrs.get("user_data_replace_on_change") is None:
+            lines.append("  user_data_replace_on_change = false")
 
     # Ignore omitted nested state so plan does not try to clear them
     if omit_blocks:
