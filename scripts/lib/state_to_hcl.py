@@ -100,9 +100,11 @@ NESTED_DROP: frozenset[str] = frozenset(
 )
 
 # Attribute pairs that conflict when both are set.
+# Value is skipped when the "other" key is present and non-empty.
 CONFLICT_SKIP_IF_OTHER: dict[str, str] = {
     "name_prefix": "name",
     "acl": "grant",  # S3: acl conflicts with grant
+    "network_interface": "instance",  # EIP: prefer instance if both set
 }
 
 HEADER = """\
